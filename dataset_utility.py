@@ -97,13 +97,13 @@ def get_songs_from_beatles(folder_name: str):
             for root, subdirectory, files in os.walk(os.path.join(folder,subdirectory)):
                 for file in files:
                     if ".lab" in file:
-                        song_queries.append(file[5:].replace(".lab","").replace("_"," "))
+                        song_queries.append('The Beatles'+' '+file[5:].replace(".lab","").replace("_"," "))
                         loc = os.path.join(root, file)
                         key = open(loc, "r")
                         key = key.read()
                         song_keys.append(key.split("Key\t")[1].split("\n")[0])
      
-        
+    
     return tf.convert_to_tensor(song_queries), tf.convert_to_tensor(song_keys)
 
 def get_songs_from_king_carole(folder_name: str):
@@ -117,7 +117,7 @@ def get_songs_from_king_carole(folder_name: str):
             for root, subdirectory, files in os.walk(os.path.join(folder,subdirectory)):
                 for file in files:
                     if ".lab" in file:
-                        song_queries.append(file[5:].replace(".lab","").replace("_"," "))
+                        song_queries.append('Carole King'+' '+file[5:].replace(".lab","").replace("_"," "))
                         loc = os.path.join(root, file)
                         key = open(loc, "r")
                         key = key.read()
@@ -137,7 +137,7 @@ def get_songs_from_queen(folder_name: str):
             for root, subdirectory, files in os.walk(os.path.join(folder,subdirectory)):
                 for file in files:
                     if ".lab" in file:
-                        song_queries.append(file[5:].replace(".lab","").replace("_"," "))
+                        song_queries.append('Queen'+' '+file[5:].replace(".lab","").replace("_"," "))
                         loc = os.path.join(root, file)
                         key = open(loc, "r")
                         key = key.read()
@@ -157,7 +157,7 @@ def get_songs_from_zweieck(folder_name: str):
             for root, subdirectory, files in os.walk(os.path.join(folder,subdirectory)):
                 for file in files:
                     if ".lab" in file:
-                        song_queries.append(file[5:].replace(".lab","").replace("_"," "))
+                        song_queries.append('Zweieck'+' '+file[5:].replace(".lab","").replace("_"," "))
                         loc = os.path.join(root, file)
                         key = open(loc, "r")
                         key = key.read()

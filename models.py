@@ -9,76 +9,15 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint
 import sys
-from e3nn import o3
+import copy
 import numpy as np
-from attention import MultiHeadAttention, ChannelAttentionGG
 import utils.key_signatures as key_sig
 from torchmetrics import Accuracy
 import torch.nn.functional as F
 from typing import Any, List, Optional, Tuple
 import torch.utils.checkpoint as cp
+from torch.autograd import Variable
 
-class EquivariantDropout(torch.nn.Module):
-    # Implementation for this Dropout class from: https://github.com/e3nn/e3nn/blob/main/e3nn/nn/_dropout.py
-    """Equivariant Dropout
-    :math:`A_{zai}` is the input and :math:`B_{zai}` is the output where
-    - ``z`` is the batch index
-    - ``a`` any non-batch and non-irrep index
-    - ``i`` is the irrep index, for instance if ``irreps="0e + 2x1e"`` then ``i=2`` select the *second vector*
-    .. math::
-        B_{zai} = \frac{x_{zi}}{1-p} A_{zai}
-    where :math:`p` is the dropout probability and :math:`x` is a Bernoulli random variable with parameter :math:`1-p`.
-    Parameters
-    ----------
-    irreps : `o3.Irreps`
-        representation
-    p : float
-        probability to drop
-    """
-
-    def __init__(self, irreps, p):
-        super().__init__()
-        self.irreps = o3.Irreps(irreps)
-        self.p = p
-
-    def __repr__(self):
-        return f"{self.__class__.__name__} ({self.irreps}, p={self.p})"
-
-    def forward(self, x):
-        """evaluate
-        Parameters
-        ----------
-        input : `torch.Tensor`
-            tensor of shape ``(batch, ..., irreps.dim)``
-        Returns
-        -------
-        `torch.Tensor`
-            tensor of shape ``(batch, ..., irreps.dim)``
-        """
-        if not self.training:
-            return x
-
-        batch = x.shape[0]
-
-        noises = []
-        for mul, (l, _p) in self.irreps:
-            dim = 2 * l + 1
-            noise = x.new_empty(batch, mul)
-
-            if self.p >= 1:
-                noise.fill_(0)
-            elif self.p <= 0:
-                noise.fill_(1)
-            else:
-                noise.bernoulli_(1 - self.p).div_(1 - self.p)
-
-            noise = noise[:, :, None].expand(-1, -1, dim).reshape(batch, mul * dim)
-            noises.append(noise)
-
-        noise = torch.cat(noises, dim=-1)
-        while noise.dim() < x.dim():
-            noise = noise[:, None]
-        return x * noise
 
 class EquivariantPitchClassConvolutionSimple(nn.Module):
     def __init__(self, pitch_classes: int, in_channels: int, out_channels: int, kernel_depth: int,
@@ -95,6 +34,7 @@ class EquivariantPitchClassConvolutionSimple(nn.Module):
         
 
     def forward(self, x: Tensor) -> Tensor:
+        # Adapted from https://www.dropbox.com/sh/k8be3v8nc8sz6p6/AAB8seucuLq1dI-26_7KA6P7a?dl=0
         """
 
         :param x: tensor if dimension   (N, in_channels,  pitch_classes, depth)
@@ -109,7 +49,6 @@ class EquivariantPitchClassConvolutionSimple(nn.Module):
             return torch.empty((x.shape[0], 1, self.pitch_classes,
                                 x.shape[3] if self._same_depth_padding else x.shape[3] - self.kernel_depth + 1),
                                device=x.device)[::, 0:0]
-            # TODO: Find better way to create tensor with dimensions that have zero length
     
     def generate_random_bias(self):
         '''
@@ -141,6 +80,7 @@ class EquivariantPitchClassConvolutionSimple(nn.Module):
                 return param
             
 class Pitch2PitchClassPool(nn.Module):
+    # Adapted from https://www.dropbox.com/sh/k8be3v8nc8sz6p6/AAB8seucuLq1dI-26_7KA6P7a?dl=0
     def __init__(self, pitch_classes: int, pitches_in: int, kernel_depth: int, padding_value):
         super().__init__()
         self.pitch_classes = pitch_classes
@@ -165,65 +105,32 @@ class Pitch2PitchClassPool(nn.Module):
             [x, torch.full(size=(shape[0], shape[1], self.padding, shape[3]), fill_value=self.padding_value, device=x.device)], dim=2)
         return self.pool(x_padded)
     
-class Pitch2PitchClassAlternative(nn.Module):
-    def __init__(self, pitch_classes: int, pitches_in: int, kernel_depth: int, padding_value, in_channels: int, n_filters):
+class Pitch2PitchClassConv(nn.Module):
+    def __init__(self, pitch_classes: int, pitches_in: int, kernel_depth: int, padding_value, in_channels):
         super().__init__()
         self.pitch_classes = pitch_classes
         self.pitches_in = pitches_in
         self.kernel_depth = kernel_depth
         self.padding_value = padding_value
-        self.in_channels = in_channels
         self.kernel_size = math.ceil(self.pitches_in / self.pitch_classes)
-        self.n_filters = n_filters
-        self.filters = n_filters
-        self.p2pc = nn.Sequential(
-            
-            nn.Conv2d(self.in_channels, self.filters, kernel_size=self.kernel_depth,padding=self.kernel_depth//2, bias=False),
-            nn.BatchNorm2d(self.filters),
-            nn.LeakyReLU(),
-            
-            nn.Conv2d(self.filters, self.filters, kernel_size=self.kernel_depth,padding=self.kernel_depth//2,bias=False),
-            nn.BatchNorm2d(self.filters),
-            nn.LeakyReLU(),
-            
-            nn.Conv2d(self.filters, self.filters, kernel_size=(5,1),dilation=(36,1),bias=False),
-            nn.BatchNorm2d(self.filters),
-            nn.LeakyReLU(),
-            
-            nn.Conv2d(self.filters, 2*self.filters, kernel_size=self.kernel_depth,padding=self.kernel_depth//2, bias=False),
-            nn.BatchNorm2d(2*self.filters),
-            nn.LeakyReLU(),
-            
-            nn.Conv2d(2*self.filters, 2*self.filters, kernel_size=self.kernel_depth,padding=self.kernel_depth//2,bias=False),
-            nn.BatchNorm2d(2*self.filters),
-            nn.LeakyReLU(),
-            
-            #nn.Conv2d(2*self.filters, 4*self.filters, kernel_size=(self.kernel_depth,1)),
-            #nn.BatchNorm2d(4*self.filters),
-            #nn.LeakyReLU(),
-            
-            #nn.Conv2d(4*self.filters, 4*self.filters, kernel_size=(self.kernel_depth,1)),
-            #nn.BatchNorm2d(4*self.filters),
-            #nn.LeakyReLU(),
-            
-            #nn.Conv2d(4*self.filters, 4*self.filters, kernel_size=(self.kernel_depth,1)),
-            #nn.BatchNorm2d(4*self.filters),
-            #nn.LeakyReLU(),
-            
-            Pitch2PitchClassPool(self.pitch_classes,36, 1, float('-inf'))
-            
-            
-            ).double().cuda()
-        shape = self.p2pc[6].weight.shape
-        self.p2pc[6].weight = torch.nn.Parameter(torch.ones(shape).double().cuda())
-        #print(self.p2pc[6].weight)
-        
+        self.padding = self.kernel_size * self.pitch_classes - self.pitches_in # not really needed as padding is avoided
+        self.in_channels = in_channels
+        self.conv = nn.Conv2d(in_channels=self.in_channels, out_channels=self.in_channels, kernel_size=(self.kernel_size, self.kernel_depth), dilation=(self.pitch_classes, 1))
+        self.bn = nn.BatchNorm2d(self.in_channels)
+        self.act = nn.LeakyReLU()
+
     def forward(self, x: Tensor) -> Tensor:
+        """
+
+        :param x: tensor if dimension   (N, in_channels,  pitch_in, depth)
+        :return:  tensor of dimension   (N, out_channels, pitch_classes, depth / kernel_depth)
+        """
+        assert len(x.shape) == 4
         
-        x = self.p2pc(x)
-        
-        return x
-        
+        shape = x.shape
+        x_padded = torch.cat(
+            [x, torch.full(size=(shape[0], shape[1], self.padding, shape[3]), fill_value=self.padding_value, device=x.device)], dim=2)
+        return self.act(self.bn(self.conv(x_padded)))
     
 class PitchClass2Pitch(nn.Module):
     def __init__(self, pitches: int):
@@ -235,8 +142,31 @@ class PitchClass2Pitch(nn.Module):
         x_repeated = x.repeat(1, 1, repetitions, 1)
         return x_repeated[::, ::, 0:self.target_length, ::]
     
+class PitchClass2Pitch_MemoryVariant(nn.Module):
+    def __init__(self, pitches: int, pitch_classes: int):
+        super().__init__()
+        self.target_length = pitches
+        self.pitch_classes = pitch_classes
+
+    def forward(self, pitches: Tensor, pitch_classes: Tensor):
+        
+        # Sum over pitch_class wise feature channels to gain same channel number
+        pitch_classes_prep = pitch_classes.reshape(pitch_classes.shape[0], pitches.shape[1], int(pitch_classes.shape[1]/pitches.shape[1]), pitch_classes.shape[2], pitch_classes.shape[3])
+        pitch_classes = torch.sum(pitch_classes_prep,axis=2)
+        # Adjust pitch and pitch class-wise feature shapes
+        pitches_int = pitches.reshape(pitches.shape[0], pitches.shape[1], self.pitch_classes, int(pitches.shape[2]/self.pitch_classes), pitches.shape[3])
+        pitch_classes_int = pitch_classes.reshape(pitch_classes.shape[0], pitch_classes.shape[1], pitch_classes.shape[2], 1, pitch_classes.shape[3])
+
+        # Combine pitch and pitch class wise features via addition
+        pitches_int = pitches_int + pitch_classes_int
+        
+        # Reshape pitch features to original form
+        pitches_out = pitches_int.reshape(pitches.shape[0], pitches.shape[1], pitches.shape[2], pitches.shape[3])
+        
+        return pitches_out
+    
 class PitchClass2PitchClass(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, conv_layers: int, resblock: bool, denseblock: bool):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, conv_layers: int, resblock: bool, denseblock: bool, multi_path: bool=False):
         super().__init__()
         self.pitch_classes = 12
         self.in_channels = in_channels
@@ -245,6 +175,7 @@ class PitchClass2PitchClass(nn.Module):
         self.conv_layers = conv_layers
         self.resblock = resblock
         self.denseblock = denseblock
+        self.multi_path = multi_path
         
         self.modules = []
         if self.resblock:
@@ -255,7 +186,7 @@ class PitchClass2PitchClass(nn.Module):
                     self.modules.append(nn.LeakyReLU())
                 self.modules.append(ResBlockEquivariant(self.kernel_size, self.conv_layers, self.out_channels))
         elif self.denseblock:
-            self.modules.append(DenseBlockEquivariant(num_layers=self.conv_layers, num_input_features=self.in_channels, bn_size=self.in_channels//2 if self.in_channels>1 else 1, growth_rate=self.out_channels, drop_rate=0.0))
+            self.modules.append(DenseBlockEquivariant(num_layers=self.conv_layers, num_input_features=self.in_channels, bn_size=self.in_channels//2 if self.in_channels>1 else 1, growth_rate=self.out_channels, drop_rate=0.0, multi_path=self.multi_path, kernel_size=self.kernel_size))
         else:
             for i in range(conv_layers):
                 if i==0:
@@ -272,7 +203,7 @@ class PitchClass2PitchClass(nn.Module):
         return pc
     
 class Pitch2Pitch(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, conv_layers: int, resblock: bool, denseblock: bool):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, conv_layers: int, resblock: bool, denseblock: bool, multi_path: bool=False):
         super().__init__()
         self.pitch_classes = 12
         self.in_channels = in_channels
@@ -281,6 +212,7 @@ class Pitch2Pitch(nn.Module):
         self.conv_layers = conv_layers
         self.resblock = resblock
         self.denseblock = denseblock
+        self.multi_path = multi_path
         
         self.modules = []
         if self.resblock:
@@ -291,7 +223,7 @@ class Pitch2Pitch(nn.Module):
                     self.modules.append(nn.LeakyReLU())
                 self.modules.append(ResBlock(self.kernel_size, self.conv_layers, self.out_channels))
         elif self.denseblock:
-            self.modules.append(DenseBlock(num_layers=self.conv_layers, num_input_features=self.in_channels, bn_size=self.in_channels//2 if self.in_channels>1 else 1, growth_rate=self.out_channels, drop_rate=0.0))
+            self.modules.append(DenseBlock(num_layers=self.conv_layers, num_input_features=self.in_channels, bn_size=self.in_channels//2 if self.in_channels>1 else 1, growth_rate=self.out_channels, drop_rate=0.0, multi_path=self.multi_path, kernel_size=self.kernel_size))
         else:
             for i in range(conv_layers):
                 if i==0:
@@ -312,7 +244,7 @@ class Pitch2Pitch(nn.Module):
     
     
 class PitchClassNetLayer(nn.Module):
-    def __init__(self, pitches, pitch_classes, num_layers, kernel_size, layer_num, window_size, conv_layers, num_filters, resblock, denseblock):
+    def __init__(self, pitches, pitch_classes, num_layers, kernel_size, layer_num, window_size, conv_layers, num_filters, opt):
         super().__init__()
         self.pitch_classes = pitch_classes
         self.pitches = pitches
@@ -320,15 +252,16 @@ class PitchClassNetLayer(nn.Module):
         self.layer_num = layer_num
         self.num_layers = num_layers
         self.window_size = window_size
-        self.a_heads = 1
-        self.a_depth = 1
         self.conv_layers = conv_layers
         self.num_filters = num_filters
         self.final_window_size = self.window_size-((self.kernel_size-1)*(self.num_layers-1)*(self.conv_layers))
         self.final = 16-self.kernel_size+1#(592//(2**(self.num_layers-1)))-1*(self.kernel_size-1)#self.final_window_size
         self.final_window_size = 1
-        self.resblock = resblock
-        self.denseblock = denseblock
+        self.resblock = opt.resblock
+        self.denseblock = opt.denseblock
+        self.stay_sixth = opt.stay_sixth
+        self.opt = opt
+        self.dense_multi_path = False
         
         # define input & output channels for each layer:
         if self.denseblock:
@@ -369,38 +302,45 @@ class PitchClassNetLayer(nn.Module):
 
         # Layer Content Definition:
         if self.layer_num==0:
-            #self.pre = Pitch2Pitch(in_channels = 1, out_channels = 1, kernel_size = self.kernel_size, conv_layers = self.conv_layers, resblock=self.resblock)
-            #self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches-(self.kernel_size-1)*self.layer_num, 1, float('-inf'))
-            self.pool_semi = nn.Conv2d(1, 1, 3, stride=(3,1), padding=(0,1),padding_mode="circular")
-            self.pool_semi_b = nn.BatchNorm2d(1)
-            self.pool_semi_a = nn.LeakyReLU()
-            #self.pool_semi = nn.MaxPool2d(kernel_size=(3,1))#nn.AvgPool2d(kernel_size=(3,1))
-            self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches//3, 1, float('-inf'))
-            #self.pool = EquivariantDilatedLayer(nf=self.num_filters, in_channels=self.num_filters, out_channels=self.num_filters)
-            self.pc2pc = PitchClass2PitchClass(in_channels = 1, out_channels = self.num_filters, kernel_size = self.kernel_size, conv_layers = self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
-            #self.pc2pc = PitchClass2PitchClass(in_channels = 80, out_channels = 80, kernel_size = self.kernel_size, conv_layers = self.conv_layers, resblock=self.resblock)
-        else:
-            #self.up = PitchClass2Pitch(self.pitches-(self.kernel_size-1)*(self.layer_num-1)*self.conv_layers)
-            self.up_sixth = nn.ConvTranspose2d(in_channels=self.all_previous_channels_pc, out_channels=self.all_previous_channels_pc, kernel_size=(3,1), stride=(3,1))
-            self.up_sixth_b = nn.BatchNorm2d(self.all_previous_channels_pc)
-            self.up_sixth_a = nn.LeakyReLU()
-            self.up = PitchClass2Pitch(self.pitches)
-            if self.denseblock:
-                self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_dense, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
+            if not self.opt.no_semitones:
+                self.pool_semi = nn.Conv2d(1, 1, 3, stride=(3,1), padding=(0,1),padding_mode="circular")
+                self.pool_semi_b = nn.BatchNorm2d(1)
+                self.pool_semi_a = nn.LeakyReLU()
+            if self.opt.p2pc_conv:
+                self.pool = Pitch2PitchClassConv(self.pitch_classes, self.pitches//3, 1, float('-inf'), in_channels=1) 
             else:
-                self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_p, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
-            #self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches-(self.kernel_size-1)*self.layer_num*self.conv_layers, 1, float('-inf'))
-            self.pool_semi = nn.Conv2d(in_channels=self.out_channels_p, out_channels=self.out_channels_p, kernel_size=(3,3), stride=(3,1), padding=(0,1), padding_mode="circular")
-            self.pool_semi_b = nn.BatchNorm2d(self.out_channels_p)
-            self.pool_semi_a = nn.LeakyReLU()
-            self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches//3, 1, float('-inf'))
-            #self.pool = EquivariantDilatedLayer(nf=(self.layer_num+1)*self.num_filters, in_channels=(self.layer_num+1)*self.num_filters, out_channels=(self.layer_num+1)*self.num_filters)
+                self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches//3, 1, float('-inf'))
+            self.pc2pc = PitchClass2PitchClass(in_channels = 1, out_channels = self.num_filters, kernel_size = self.kernel_size, conv_layers = self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
+        else:
+            if self.stay_sixth or (self.opt.no_semitones):
+                self.up = PitchClass2Pitch(self.pitches//3)
+            else:
+                self.up_sixth = nn.ConvTranspose2d(in_channels=self.all_previous_channels_pc, out_channels=self.all_previous_channels_pc, kernel_size=(3,1), stride=(3,1))
+                self.up_sixth_b = nn.BatchNorm2d(self.all_previous_channels_pc)
+                self.up_sixth_a = nn.LeakyReLU()
+                if self.opt.pc2p_mem:
+                    self.up = PitchClass2Pitch_MemoryVariant(self.pitches, self.pitch_classes if self.opt.no_semitones else self.pitch_classes*3)
+                else:
+                    self.up = PitchClass2Pitch(self.pitches)
             if self.denseblock:
-                self.pc2pc = PitchClass2PitchClass(in_channels=self.out_channels_p+self.all_previous_channels_pc, out_channels=self.out_channels_dense, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
+                self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_dense, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock, multi_path=self.dense_multi_path)
+            else:
+                self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_p if self.opt.pc2p_mem else self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_p, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
+            if not self.stay_sixth and (not self.opt.no_semitones):
+                self.pool_semi = nn.Conv2d(in_channels=self.out_channels_p, out_channels=self.out_channels_p, kernel_size=(3,3), stride=(3,1), padding=(0,1), padding_mode="circular")
+                self.pool_semi_b = nn.BatchNorm2d(self.out_channels_p)
+                self.pool_semi_a = nn.LeakyReLU()
+            if self.opt.p2pc_conv:
+                self.pool = Pitch2PitchClassConv(self.pitch_classes, self.pitches//3, 1, float('-inf'), in_channels=self.out_channels_p)
+            else:
+                self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches//3, 1, float('-inf'))
+            if self.denseblock:
+                self.pc2pc = PitchClass2PitchClass(in_channels=self.out_channels_p+self.all_previous_channels_pc, out_channels=self.out_channels_dense, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock, multi_path=self.dense_multi_path)
             else:
                 self.pc2pc = PitchClass2PitchClass(in_channels=self.out_channels_p+self.all_previous_channels_pc, out_channels=self.out_channels_pc, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
-            self.time_pool_p = nn.MaxPool2d(kernel_size=(1,2))
-            self.time_pool_pc = nn.MaxPool2d(kernel_size=(1,2))
+            if not self.opt.local:
+                self.time_pool_p = nn.MaxPool2d(kernel_size=(1,self.opt.time_pool_size))
+                self.time_pool_pc = nn.MaxPool2d(kernel_size=(1,self.opt.time_pool_size))
 
     def forward(self, x: Tensor) -> Tensor:
         
@@ -410,43 +350,43 @@ class PitchClassNetLayer(nn.Module):
         assert len(p.shape) == 4
         
         if self.layer_num==0:
-            #p = self.pre(p)
-            p_semi = self.pool_semi(p) # Pool from Sixth of a tone to semitone
-            p_semi = self.pool_semi_b(p_semi)
-            p_semi = self.pool_semi_a(p_semi)
+            if not self.opt.no_semitones:
+                p_semi = self.pool_semi(p) # Pool from a third of a semitone to semitone
+                p_semi = self.pool_semi_b(p_semi)
+                p_semi = self.pool_semi_a(p_semi)
+            else:
+                p_semi = p
+            if self.stay_sixth:
+                p = p_semi
             pc = self.pool(p_semi) # Pitch2PitchClass
             pc = self.pc2pc(pc) # Equivariant Layer
-            #print("PC2PC Layer1: "+str(pc.shape))
         else:
-            p_sixth = self.up_sixth(pc)
-            p_sixth = self.up_sixth_b(p_sixth)
-            p_sixth = self.up_sixth_a(p_sixth)
-            p2 = self.up(p_sixth) # PitchClass2Pitch
-            p = torch.cat([p,p2],dim=1) # PitchConcat
-            #print("P after Concat: "+str(p.shape))
+            if (not self.stay_sixth) and (not self.opt.no_semitones):
+                p_sixth = self.up_sixth(pc)
+                p_sixth = self.up_sixth_b(p_sixth)
+                p_sixth = self.up_sixth_a(p_sixth)
+                if self.opt.pc2p_mem:
+                    p = self.up(p, p_sixth)
+                else:
+                    p2 = self.up(p_sixth) # PitchClass2Pitch
+            else:
+                if not self.opt.pc2p_mem:
+                    p2 = self.up(pc)
+            if not self.opt.pc2p_mem:
+                p = torch.cat([p,p2],dim=1) # PitchConcat
             p = self.p2p(p) # Pitch2PitchConv
-            #print("P after P2P: "+str(p.shape))
-            pc2 = self.pool_semi(p) # Pool from Sixth of a tone to semitone
-            pc2 = self.pool_semi_b(pc2)
-            pc2 = self.pool_semi_a(pc2)
-            pc2 = self.pool(pc2) # Pitch2PitchClass
-            #print("PC after Pool: "+str(pc2.shape))
+            if (not self.stay_sixth) and (not self.opt.no_semitones):
+                pc2 = self.pool_semi(p) # Pool from Third of a semitone to semitone
+                pc2 = self.pool_semi_b(pc2)
+                pc2 = self.pool_semi_a(pc2)
+                pc2 = self.pool(pc2) # Pitch2PitchClass
+            else:
+                pc2 = self.pool(p) # Pitch2PitchClass
             pc = torch.cat([pc, pc2],dim=1) # PitchClassConcat
-            #print("PC after Concat: "+str(pc.shape))
             pc = self.pc2pc(pc) # Equivariant Layer
-            #print("PC after PC2PC: "+str(pc.shape))
-            p = self.time_pool_p(p) # Time Pooling for pitch wise level
-            pc = self.time_pool_pc(pc) # Time Pooling for pitchClass wise level
-        if self.layer_num==(self.num_layers-1):
-            #tonic = self.tonic_classifier(pc)
-            #tonic = torch.mean(tonic, axis=-1)
-            #tonic = nn.Flatten()(tonic)
-            #pc = self.eq(pc)
-            #pc = self.global_pool(pc)
-            #pc = torch.mean(pc, axis=-1)
-            #pc = nn.Flatten()(pc)
-            #pc = self.sig(pc)
-            pass
+            if not self.opt.local:
+                p = self.time_pool_p(p) # Time Pooling for pitch wise level
+                pc = self.time_pool_pc(pc) # Time Pooling for pitchClass wise level
             
             
         return (p, pc)
@@ -507,8 +447,9 @@ class ResBlockEquivariant(nn.Module):
         return x
 
 class _DenseLayer(nn.Module):
+    # Code adapted from https://github.com/pytorch/vision/blob/main/torchvision/models/densenet.py
     def __init__(
-        self, num_input_features: int, growth_rate: int, bn_size: int, drop_rate: float, memory_efficient: bool = False
+        self, num_input_features: int, growth_rate: int, bn_size: int, drop_rate: float, kernel_size: int, memory_efficient: bool = True
     ) -> None:
         super().__init__()
         self.norm1 = nn.BatchNorm2d(num_input_features)
@@ -517,7 +458,7 @@ class _DenseLayer(nn.Module):
 
         self.norm2 = nn.BatchNorm2d(bn_size * growth_rate)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(bn_size * growth_rate, growth_rate, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(bn_size * growth_rate, growth_rate, kernel_size=kernel_size, stride=1, padding=kernel_size//2, bias=False)
 
         self.drop_rate = float(drop_rate)
         self.memory_efficient = memory_efficient
@@ -527,7 +468,6 @@ class _DenseLayer(nn.Module):
         bottleneck_output = self.conv1(self.relu1(self.norm1(concated_features)))  # noqa: T484
         return bottleneck_output
 
-    # todo: rewrite when torchscript supports any
     def any_requires_grad(self, input: List[Tensor]) -> bool:
         for tensor in input:
             if tensor.requires_grad:
@@ -571,8 +511,9 @@ class _DenseLayer(nn.Module):
         return new_features
 
 class _DenseLayerEquivariant(nn.Module):
+    # Code adapted from https://github.com/pytorch/vision/blob/main/torchvision/models/densenet.py
     def __init__(
-        self, num_input_features: int, growth_rate: int, bn_size: int, drop_rate: float, memory_efficient: bool = False
+        self, num_input_features: int, growth_rate: int, bn_size: int, drop_rate: float, kernel_size: int, memory_efficient: bool = True
     ) -> None:
         super().__init__()
         self.norm1 = nn.BatchNorm2d(num_input_features)
@@ -581,7 +522,7 @@ class _DenseLayerEquivariant(nn.Module):
 
         self.norm2 = nn.BatchNorm2d(bn_size * growth_rate)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = EquivariantPitchClassConvolutionSimple(pitch_classes=12, in_channels=bn_size * growth_rate, out_channels=growth_rate, kernel_depth=3, same_depth_padding=True)
+        self.conv2 = EquivariantPitchClassConvolutionSimple(pitch_classes=12, in_channels=bn_size * growth_rate, out_channels=growth_rate, kernel_depth=kernel_size, same_depth_padding=True)
 
         self.drop_rate = float(drop_rate)
         self.memory_efficient = memory_efficient
@@ -591,7 +532,6 @@ class _DenseLayerEquivariant(nn.Module):
         bottleneck_output = self.conv1(self.relu1(self.norm1(concated_features)))  # noqa: T484
         return bottleneck_output
 
-    # todo: rewrite when torchscript supports any
     def any_requires_grad(self, input: List[Tensor]) -> bool:
         for tensor in input:
             if tensor.requires_grad:
@@ -635,7 +575,7 @@ class _DenseLayerEquivariant(nn.Module):
         return new_features
     
 class DenseBlock(nn.ModuleDict):
-
+    # Code adapted from https://github.com/pytorch/vision/blob/main/torchvision/models/densenet.py
     def __init__(
         self,
         num_layers: int,
@@ -643,7 +583,10 @@ class DenseBlock(nn.ModuleDict):
         bn_size: int,
         growth_rate: int,
         drop_rate: float,
-        memory_efficient: bool = False,
+        memory_efficient: bool = True,
+        # gradually increase kernel_size by 2 to imitate mulit_path idea
+        multi_path: bool = True,
+        kernel_size: int = 7,
     ) -> None:
         super().__init__()
         for i in range(num_layers):
@@ -652,6 +595,7 @@ class DenseBlock(nn.ModuleDict):
                 growth_rate=growth_rate,
                 bn_size=bn_size,
                 drop_rate=drop_rate,
+                kernel_size=(2*i+3) if multi_path else kernel_size,
                 memory_efficient=memory_efficient,
             )
             self.add_module("denselayer%d" % (i + 1), layer)
@@ -664,7 +608,7 @@ class DenseBlock(nn.ModuleDict):
         return torch.cat(features, 1)
     
 class DenseBlockEquivariant(nn.ModuleDict):
-
+    # Code adapted from https://github.com/pytorch/vision/blob/main/torchvision/models/densenet.py
     def __init__(
         self,
         num_layers: int,
@@ -672,7 +616,10 @@ class DenseBlockEquivariant(nn.ModuleDict):
         bn_size: int,
         growth_rate: int,
         drop_rate: float,
-        memory_efficient: bool = False,
+        memory_efficient: bool = True,
+        # gradually increase kernel_size by 2 to imitate mulit_path idea
+        multi_path: bool = True,
+        kernel_size: int = 7,
     ) -> None:
         super().__init__()
         for i in range(num_layers):
@@ -681,6 +628,7 @@ class DenseBlockEquivariant(nn.ModuleDict):
                 growth_rate=growth_rate,
                 bn_size=bn_size,
                 drop_rate=drop_rate,
+                kernel_size=(2*i+3) if multi_path else kernel_size,
                 memory_efficient=memory_efficient,
             )
             self.add_module("denselayer%d" % (i + 1), layer)
@@ -693,12 +641,10 @@ class DenseBlockEquivariant(nn.ModuleDict):
         return torch.cat(features, 1)
 
 
-class AttentionPitchClassNet(pl.LightningModule):
+class PitchClassNet(pl.LightningModule):
     
     def __init__(self, pitches, pitch_classes, num_layers, kernel_size, opt=None, window_size=23, batch_size=4, train_set=None, val_set=None):
         super().__init__()
-        # set hyperparams
-        #self.hparams.update(hparams)
         self.pitches = pitches
         self.pitch_classes = pitch_classes
         self.num_layers = num_layers
@@ -710,15 +656,16 @@ class AttentionPitchClassNet(pl.LightningModule):
         self.n_filters = opt.n_filters
         self.resblock = opt.resblock
         self.denseblock = opt.denseblock
+        self.best_mirex_score = 0
         self.data = {'train': train_set,
                      'val': val_set}
-        
+
         ########################################################################
         # Initialize Model:                                               #
         ########################################################################
         self.modules = []
         for i in range(self.num_layers):
-            self.modules.append(PitchClassNetLayer(self.pitches, self.pitch_classes, self.num_layers, self.kernel_size, i, self.window_size, self.conv_layers, self.n_filters, self.resblock, self.denseblock))
+            self.modules.append(PitchClassNetLayer(self.pitches, self.pitch_classes, self.num_layers, self.kernel_size, i, self.window_size, self.conv_layers, self.n_filters, self.opt))
         
         
         self.model = nn.Sequential(*self.modules)
@@ -754,39 +701,97 @@ class AttentionPitchClassNet(pl.LightningModule):
                 self.final_channels = self.n_filters
             else:
                 self.final_channels = 4*self.all_previous_channels_pc
-
-        #self.final_channels_tonic = self.final_channels if self.num_layers>1 else 1
-        #self.final_channels_tonic_int = self.final_channels_tonic if self.num_layers>1 else self.n_filters
-        self.tonic_classifier = nn.Sequential(
-            EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=1, kernel_depth=self.kernel_size),
-            ).double().cuda()
-        self.key_classifier = nn.Sequential(
-            EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=1, kernel_depth=self.kernel_size),
-            ).double().cuda()
-        #self.eq = EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels=80, out_channels=1, kernel_depth=self.kernel_size).double().cuda()
-        #self.global_pool = nn.MaxPool2d(kernel_size=(1,self.final))
+        
+        # Define Classifier heads:
+        self.t_head_m = []
+        self.k_head_m = []
+        self.g_head_m = []
+        for i in range(self.opt.head_layers):
+            if i == (self.opt.head_layers-1):
+                self.t_head_m.append(EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=1, kernel_depth=self.kernel_size))
+                self.k_head_m.append(EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=1, kernel_depth=self.kernel_size))
+                if self.opt.local:
+                    self.t_head_m.append(nn.MaxPool2d(kernel_size=(1,(opt.frames*opt.loc_window_size)-self.opt.head_layers*(self.kernel_size-1)),stride=1,dilation=1))
+                    self.k_head_m.append(nn.MaxPool2d(kernel_size=(1,(opt.frames*opt.loc_window_size)-self.opt.head_layers*(self.kernel_size-1)),stride=1,dilation=1))
+                if self.opt.genre:
+                    self.g_head_m.append(nn.Conv2d(in_channels = self.final_channels, out_channels = 1, kernel_size=(2, self.kernel_size)))
+            else:
+                self.t_head_m.append(EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=2*self.final_channels if i==0 else self.final_channels, kernel_depth=self.kernel_size))
+                self.t_head_m.append(nn.BatchNorm2d(2*self.final_channels if i==0 else self.final_channels))
+                self.t_head_m.append(nn.LeakyReLU())
+                self.k_head_m.append(EquivariantPitchClassConvolutionSimple(pitch_classes=self.pitch_classes, in_channels = self.final_channels, out_channels=2*self.final_channels if i==0 else self.final_channels, kernel_depth=self.kernel_size))
+                self.k_head_m.append(nn.BatchNorm2d(2*self.final_channels if i==0 else self.final_channels))
+                self.k_head_m.append(nn.LeakyReLU())
+                if self.opt.genre:
+                    self.g_head_m.append(nn.Conv2d(in_channels = self.final_channels, out_channels = 2*self.final_channels if i==0 else self.final_channels, kernel_size = (1, self.kernel_size)))
+                    self.g_head_m.append(nn.BatchNorm2d(2*self.final_channels if i==0 else self.final_channels))
+                    self.g_head_m.append(nn.LeakyReLU())
+                if i==0:
+                    self.final_channels = 2*self.final_channels
+                
+        self.tonic_classifier = nn.Sequential(*self.t_head_m).double().cuda()
+        self.key_classifier = nn.Sequential(*self.k_head_m).double().cuda()
+        if self.opt.genre:
+            self.genre_classifier = nn.Sequential(*self.g_head_m).double().cuda()
+        
         self.sig = nn.Sigmoid()
 
     
-    def forward(self, mel):
-        
-        #mel = self.feature_extractor(mel)
+    def forward(self, mel, seq_length):
+
         (p, pc) = self.model((mel,None))
         tonic = self.tonic_classifier(pc)
-        tonic = torch.mean(tonic, axis=-1)
-        tonic = nn.Flatten()(tonic)
-        pc = self.key_classifier(pc)
-        #pc = self.global_pool(pc)
-        pc = torch.mean(pc, axis=-1)
-        pc = nn.Flatten()(pc)
-        pc = self.sig(pc)
-        if self.opt.local: # for local key estimation
-            x = pc.reshape(pc.shape[0], pc.shape[2], pc.shape[3])
-        else: # for global key estimation
-            #x = pc.reshape(pc.shape[0], pc.shape[2])
-            x = (pc, tonic)
-        
-        
+        key = self.key_classifier(pc)
+        if self.opt.genre:
+            genre = self.genre_classifier(pc)
+        if seq_length!=None and not self.opt.local:
+            # calculates actual seq_length of model output
+            # takes model operations into account
+            actual_seq_length = seq_length
+            for i in range(self.num_layers-1):
+                actual_seq_length = torch.floor(actual_seq_length/self.opt.time_pool_size)
+            actual_seq_length = actual_seq_length.int()-(self.kernel_size-1)*self.opt.head_layers
+            # computes mean of final model ouput given only the actual seq length
+            # needs to be done seperately for each element in the batch
+
+            for j in range(tonic.shape[0]):
+                if j==0:
+                    tonic_out = torch.mean(tonic[j,:,:,:actual_seq_length[j]],axis=-1)
+                    key_out = torch.mean(key[j,:,:,:actual_seq_length[j]],axis=-1)
+                    tonic_out = tonic_out.reshape(1, tonic_out.shape[0],tonic_out.shape[1])
+                    key_out = key_out.reshape(1, key_out.shape[0],key_out.shape[1])
+                    if self.opt.genre:
+                     genre_out = torch.mean(genre[j,:,:,:actual_seq_length[j]],axis=-1)
+                     genre_out = genre_out.reshape(1, genre_out.shape[0],genre_out.shape[1])
+                else:
+                    tonic_out = torch.cat((tonic_out, torch.mean(tonic[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, tonic_out.shape[1],tonic_out.shape[2])))
+                    key_out = torch.cat((key_out, torch.mean(key[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, key_out.shape[1],key_out.shape[2])))
+                    if self.opt.genre:
+                        genre_out = torch.cat((genre_out, torch.mean(genre[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, genre_out.shape[1],genre_out.shape[2])))
+        elif (not self.opt.local):
+            tonic_out = torch.mean(tonic, axis=-1)
+            key_out = torch.mean(key, axis=-1)
+            if self.opt.genre:
+                genre_out = torch.mean(genre, axis=-1)
+
+        if not self.opt.local:
+            tonic_out = nn.Flatten()(tonic_out)
+            key_out = nn.Flatten()(key_out)
+            key_out = self.sig(key_out)
+            if self.opt.genre:
+                genre_out = nn.Flatten()(genre_out)
+        else:
+            tonic_out = tonic.reshape(tonic.shape[0],tonic.shape[3],tonic.shape[2])
+            key_out = key.reshape(key.shape[0],key.shape[3],key.shape[2])
+            key_out = self.sig(key_out)
+            if self.opt.genre:
+                genre_out = genre.reshape(genre.shape[0],genre.shape[3],genre.shape[2])
+
+        if self.opt.genre:
+            x = (key_out, tonic_out, genre_out)
+        else:
+            x = (key_out, tonic_out)
+
         return x
 
     def general_step(self, batch, batch_idx, mode):
@@ -795,42 +800,109 @@ class AttentionPitchClassNet(pl.LightningModule):
         key_signature_id = batch['key_signature_id']
         key_labels = batch['key_labels'].double()
         tonic_labels = batch['tonic_labels'].long()
-        tonic_labels_idx = torch.argmax(tonic_labels,axis=1)
-        
+        if self.opt.genre:
+            genre_labels = batch['genre'].long()
         if self.opt.local:
+            tonic_labels_idx = torch.argmax(tonic_labels,axis=2)
+            if self.opt.genre:
+                genre_labels_idx = torch.argmax(genre_labels,axis=2)
+        else:
+            tonic_labels_idx = torch.argmax(tonic_labels, axis=1)
+            if self.opt.genre:
+                genre_labels_idx = torch.argmax(genre_labels, axis=1)
+
+        if self.opt.genre:
+            # create mask for genre loss
+            # shall ignore missing genre labels
+            genre_mask = torch.sum(genre_labels, axis=1)==1
+            genre_mask = genre_mask.cuda()
+
+        if self.opt.local or self.opt.frames>0:
             seq_length = batch['seq_length']
         # forward pass
-        out = self.forward(mel)
-        key_out, tonic_out = out
+        if self.opt.frames>0:
+            out = self.forward(mel,seq_length)
+        else:
+            out = self.forward(mel, None)
+        if self.opt.genre:
+            key_out, tonic_out, genre_out = out
+        else:
+            key_out, tonic_out = out
         
         # loss
         loss_func = nn.BCELoss()
         loss_func_tonic = nn.CrossEntropyLoss()
+        loss_func_genre = nn.CrossEntropyLoss()
         bce_loss = 0
-        
+        tonic_loss = 0
+        genre_loss = 0
         if self.opt.local: # for local key estimation
+            if self.opt.genre:
+                genre_out = genre_out.reshape(genre_out.shape[0], genre_out.shape[2], genre_out.shape[1])
             for i in range(mel.shape[0]):
-                
-                bce_loss = bce_loss + loss_func(key_out[i,:,:(seq_length[i]-self.window_size+1)], key_labels[i,:,:(seq_length[i]-self.window_size+1)])
+                bce_loss = bce_loss + loss_func(key_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], key_labels[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:])
+                tonic_loss = tonic_loss + loss_func_tonic(tonic_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], tonic_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1)])
+                if self.opt.genre:
+                    genre_out = genre_out[genre_mask]
+                    genre_labels_idx = genre_labels_idx[genre_mask]
+                    if torch.sum(genre_mask)==0:
+                        genre_loss = torch.zeros(1)
+                    else:
+                        genre_loss = genre_loss + loss_func_genre(genre_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], genre_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1)])
+                        genre_loss = genre_loss/mel.shape[0]
+            bce_loss = bce_loss/mel.shape[0]
+            tonic_loss = tonic_loss/mel.shape[0]
         else:
             bce_loss = loss_func(key_out, key_labels) # for global key estimation
-            tonic_loss = loss_func_tonic(tonic_out.detach().cpu(), tonic_labels_idx.detach().cpu())
+            tonic_loss = loss_func_tonic(tonic_out, tonic_labels_idx)
+            if self.opt.genre:
+                genre_out = genre_out[genre_mask]
+                genre_labels_idx = genre_labels_idx[genre_mask]
+                genre_loss = loss_func_genre(genre_out, genre_labels_idx)
+
+        if self.opt.use_cos:
+            cosine_sim_func = nn.CosineSimilarity(dim=1)
+            cosine_sim = cosine_sim_func(key_out, key_labels)
             
-        cosine_sim_func = nn.CosineSimilarity(dim=1)
-        #cosine_sim = cosine_sim_func(key_out, key_labels)
-        loss = bce_loss + self.opt.tonic_weight*tonic_loss# + (1 - torch.sum(cosine_sim)/key_out.shape[0])
+        loss = self.opt.key_weight*bce_loss + self.opt.tonic_weight*tonic_loss
+        
+        if self.opt.genre:
+            if torch.sum(genre_mask)!=0:
+                loss += self.opt.genre_weight*genre_loss
+    
+        if self.opt.use_cos:
+            loss += (1 - torch.sum(cosine_sim)/key_out.shape[0])
         
         if self.opt.local: # for local key estimation
+            mirex, correct, fifths, relative, parallel, other, accuracy, accuracy_tonic, accuracy_genre = 0,0,0,0,0,0,0,0,0
             for i in range(mel.shape[0]):
-                accuracy = accuracy + self.all_key_accuracy_local(key_labels[i,:,:(seq_length[i]-self.window_size+1)], key_out[i,:,:(seq_length[i]-self.window_size+1)])
+                mirex_sub, correct_sub, fifths_sub, relative_sub, parallel_sub, other_sub, accuracy_sub = self.mirex_score(key_labels[i,:(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], key_out[i,:(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], tonic_labels[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], tonic_out[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], key_signature_id[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:])
+                mirex, correct, fifths, relative, parallel, other, accuracy = mirex+mirex_sub, correct+correct_sub, fifths+fifths_sub, relative+relative_sub, parallel+parallel_sub, other+other_sub, accuracy+accuracy_sub
+                Accuracy_tonic = Accuracy().cuda()
+                accuracy_tonic = accuracy_tonic + Accuracy_tonic(torch.argmax(tonic_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1)),:],axis=1), tonic_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))]) 
+                if self.opt.genre:
+                    if torch.sum(genre_mask)==0:
+                        accuracy_genre = torch.tensor(0.0).float()
+                    else:
+                        Accuracy_genre = Accuracy().cuda()
+                        accuracy_genre = accuracy_genre + Accuracy_genre(torch.argmax(genre_out[i,:,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))],axis=1), genre_labels_idx[i,:,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))])
+            mirex, correct, fifths, relative, parallel, other, accuracy, accuracy_tonic, accuracy_genre = torch.tensor(mirex/mel.shape[0]).clone().float(), torch.tensor(correct/mel.shape[0]).clone().float(), torch.tensor(fifths/mel.shape[0]).clone().float(), torch.tensor(relative/mel.shape[0]).clone().float(), torch.tensor(parallel/mel.shape[0]).clone().float(), torch.tensor(other/mel.shape[0]).clone().float(), torch.tensor(accuracy/mel.shape[0]).clone().float(), torch.tensor(accuracy_tonic/mel.shape[0]).clone().float(), torch.tensor(accuracy_genre/mel.shape[0]).clone().float()
         else:
-            #accuracy = self.all_key_accuracy(key_labels, key_out)# for global key estimation
             mirex, correct, fifths, relative, parallel, other, accuracy = self.mirex_score(key_labels, key_out, tonic_labels, tonic_out, key_signature_id)
             Accuracy_tonic = Accuracy().cuda()
             accuracy_tonic = Accuracy_tonic(torch.argmax(tonic_out,axis=1), tonic_labels_idx)
-            
-            
-        return loss, accuracy, mirex, correct, fifths, relative, parallel, other, accuracy_tonic
+            if self.opt.genre:
+                # shall prevent error for datasets with missing genre labels
+                # simply ignore the genre accuracy for those
+                if torch.sum(genre_mask)==0:
+                    accuracy_genre = torch.tensor(0.0).float()
+                else:
+                    Accuracy_genre = Accuracy().cuda()
+                    accuracy_genre = Accuracy_genre(torch.argmax(genre_out,axis=1), genre_labels_idx)
+            else:
+                accuracy_genre = torch.tensor(0.0).float()
+
+        return loss, accuracy, mirex, correct, fifths, relative, parallel, other, accuracy_tonic, accuracy_genre
 
     def general_end(self, outputs, mode):
         # average over all batches aggregated during one epoch
@@ -851,10 +923,12 @@ class AttentionPitchClassNet(pl.LightningModule):
             [x[mode + '_other'] for x in outputs]).mean()
         acc_tonic = torch.stack(
             [x[mode + '_accuracy_tonic'] for x in outputs]).mean()
-        return avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic
+        acc_genre = torch.stack(
+            [x[mode + '_accuracy_genre'] for x in outputs]).mean()
+        return avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre
 
     def training_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "train")
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "train")
         tensorboard_logs = {'loss': loss}
         should_log = False
         if batch_idx % self.trainer.accumulate_grad_batches == 0:
@@ -864,21 +938,23 @@ class AttentionPitchClassNet(pl.LightningModule):
         if should_log:
             self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
 
-        return {'loss': loss, 'train_accuracy': accuracy, 'train_mirex_score': mirex_score, 'train_correct': correct, 'train_fifths': fifths, 'train_relative': relative, 'train_parallel': parallel, 'train_other': other, 'train_accuracy_tonic': acc_tonic, 'log': tensorboard_logs}
+        return {'loss': loss, 'train_accuracy': accuracy, 'train_mirex_score': mirex_score, 'train_correct': correct, 'train_fifths': fifths, 'train_relative': relative, 'train_parallel': parallel, 'train_other': other, 'train_accuracy_tonic': acc_tonic, 'train_accuracy_genre': acc_genre, 'log': tensorboard_logs}
 
     def validation_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "val")
-        return {'val_loss': loss, 'val_accuracy': accuracy, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic}
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "val")
+        return {'val_loss': loss, 'val_accuracy': accuracy, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre}
 
     def test_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "test")
-        return {'test_loss': loss, 'test_accuracy': accuracy, 'test_mirex_score': mirex_score, 'train_correct': correct, 'test_fifths': fifths, 'test_relative': relative, 'test_parallel': parallel, 'test_other': other, 'test_accuracy_tonic': acc_tonic}
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "test")
+        return {'test_loss': loss, 'test_accuracy': accuracy, 'test_mirex_score': mirex_score, 'train_correct': correct, 'test_fifths': fifths, 'test_relative': relative, 'test_parallel': parallel, 'test_other': other, 'test_accuracy_tonic': acc_tonic, 'test_accuracy_genre': acc_genre}
 
     def validation_epoch_end(self, outputs):
-        avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_end(outputs, "val")
+        avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_end(outputs, "val")
         print("Val-Loss={}".format(avg_loss))
         print("Val-Acc={}".format(acc))
         print("Val-Acc_Tonic={}".format(acc_tonic))
+        if self.opt.genre:
+            print("Val-Acc_Genre={}".format(acc_genre))
         print("Val-Mirex_Score={}".format(mirex_score))
         self.log("val_loss", avg_loss)
         self.log("val_accuracy", acc)
@@ -889,17 +965,23 @@ class AttentionPitchClassNet(pl.LightningModule):
         self.log("val_parallel", parallel)
         self.log("val_other", other)
         self.log("val_accuracy_tonic", acc_tonic)
-        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
-        self.logger.experiment.add_scalar("val_mirex_score", mirex_score, self.global_step)
-        self.logger.experiment.add_scalar("val_correct", correct, self.global_step)
-        self.logger.experiment.add_scalar("val_fifths", fifths, self.global_step)
-        self.logger.experiment.add_scalar("val_relative", relative, self.global_step)
-        self.logger.experiment.add_scalar("val_parallel", parallel, self.global_step)
-        self.logger.experiment.add_scalar("val_other", other, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy_tonic", acc_tonic, self.global_step)
-        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic}
-        return {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'log': tensorboard_logs}
+        self.log("val_accuracy_genre", acc_genre)
+        if mirex_score > self.best_mirex_score and not self.opt.no_ckpt:
+            self.best_mirex_score = mirex_score
+            torch.save(self.state_dict(), 'Model_logs/lightning_logs/version_'+str(self.logger.version)+'/best_model.pt')
+        if not self.opt.no_ckpt:
+            self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
+            self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
+            self.logger.experiment.add_scalar("val_mirex_score", mirex_score, self.global_step)
+            self.logger.experiment.add_scalar("val_correct", correct, self.global_step)
+            self.logger.experiment.add_scalar("val_fifths", fifths, self.global_step)
+            self.logger.experiment.add_scalar("val_relative", relative, self.global_step)
+            self.logger.experiment.add_scalar("val_parallel", parallel, self.global_step)
+            self.logger.experiment.add_scalar("val_other", other, self.global_step)
+            self.logger.experiment.add_scalar("val_accuracy_tonic", acc_tonic, self.global_step)
+            self.logger.experiment.add_scalar("val_accuracy_genre", acc_genre, self.global_step)
+        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre}
+        return {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre, 'log': tensorboard_logs}
     
     def train_dataloader(self):
         return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
@@ -912,8 +994,375 @@ class AttentionPitchClassNet(pl.LightningModule):
     
     def configure_optimizers(self):
 
-        params = list(self.model.parameters()) + list(self.tonic_classifier.parameters()) + list(self.key_classifier.parameters())# + list(self.classifier.parameters())
+        if self.opt.genre:
+            params = list(self.model.parameters()) + list(self.tonic_classifier.parameters()) + list(self.key_classifier.parameters()) + list(self.genre_classifier.parameters())
+        else:
+            params = list(self.model.parameters()) + list(self.tonic_classifier.parameters()) + list(self.key_classifier.parameters())# + list(self.classifier.parameters())
             
+        optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
+
+        return [optim], [scheduler]
+    
+    def all_key_accuracy(self, y_true, y_pred):
+        score, accuracy, samples = 0, 0, 0
+        for i in range(len(y_true)):
+            y_pred_keys = y_pred[i]
+            y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
+            label_key = y_true[i]
+            correct_keys = torch.sum(y_pred_keys == label_key)
+            score = score + correct_keys
+            accuracy = accuracy + (1 if correct_keys == 12 else 0)
+            samples = samples + 1
+        return torch.tensor((accuracy / samples))
+    
+    def all_key_accuracy_local(self, y_true, y_pred):
+        score, accuracy, samples = 0, 0, 0
+        y_pred_keys = y_pred
+        y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
+        label_key = y_true
+        correct_keys = torch.sum(y_pred_keys == label_key)
+        score = score + correct_keys
+        accuracy = accuracy + (1 if correct_keys == 12 else 0)
+        samples = samples + 1
+        return torch.tensor((accuracy / samples))
+    
+    # not functional yet!!!
+    def single_key_accuracy(y_true, y_pred):
+        score, accuracy, samples = 0, 0, 0
+        for i in range(len(y_true)):
+            y_pred_keys = y_pred[i]
+            y_pred_keys = tf.cast(y_pred_keys >= tf.sort(y_pred_keys)[-7], tf.float32)
+            label_key = y_true[i]
+            correct_keys = tf.math.reduce_sum(tf.cast(y_pred_keys == label_key[:12], tf.int32))
+            score = score + correct_keys
+            accuracy = accuracy + (1 if correct_keys == 12 else 0)
+            samples = samples + 1
+        return tf.convert_to_tensor((score / (samples*12)))
+
+    def mirex_score(self, key_labels, key_preds, tonic_labels, tonic_preds, key_signature_id):
+        score, accuracy, samples = 0, 0, 0
+        similarity = 0
+        correct_tonics_total = 0
+        mirex_score, correct, fifths, parallel, relative, other = 0, 0, 0, 0, 0, 0
+    
+        for i in range(len(key_labels)):
+            category = 0
+            key_label = key_labels[i]
+            key_pred_values = key_preds[i]
+            tonic_label = tonic_labels[i]
+            tonic_pred = tonic_preds[i]
+            KEY_SIGNATURE_MAP = torch.tensor(key_sig.KEY_SIGNATURE_MAP.numpy()).cuda()
+    
+            # Every Key signature contains 7 pitch classes so use top 7 pitch class predictions
+            #   Only major and minor are relevant for the dataset
+    
+            # Find most similar cosine key signature given key predictions:
+            cosinesim = nn.CosineSimilarity(dim=1)
+            pred_key_id = torch.argmax(cosinesim(key_pred_values.reshape(1,key_pred_values.shape[0]), KEY_SIGNATURE_MAP))
+            key_pred = KEY_SIGNATURE_MAP[pred_key_id]
+            key_sig_label_id = torch.argmax(key_signature_id[i])
+            
+            # Check for relative fifths:
+            cosinesim2 = nn.CosineSimilarity(dim=0)
+            correct_keys = torch.sum(key_pred == key_label)
+            score = score + correct_keys
+            accuracy = accuracy + (1 if correct_keys == 12 else 0)
+            samples = samples + 1
+            similarity = similarity + cosinesim2(key_pred_values, key_label)
+            diff = torch.abs(pred_key_id - key_sig_label_id)
+            correct_tonic = 1 if torch.argmax(tonic_label) == torch.argmax(tonic_pred) else 0
+            tonic_diff = torch.abs(torch.argmax(tonic_label) - torch.argmax(tonic_pred))
+            correct_tonics_total = correct_tonics_total + correct_tonic
+    
+            if (diff == 1) and not(correct_tonic == 1 and correct_keys == 12):
+                fifths = fifths + 1
+                category = 1
+            if correct_tonic == 1 and correct_keys == 12 and category == 0:
+                correct = correct + 1
+                category = 1
+            if correct_keys == 12 and correct_tonic == 0 and category == 0:
+                relative = relative + 1
+                category = 1
+            if correct_tonic == 1 and correct_keys != 12 and category == 0:
+                parallel = parallel + 1
+                category = 1
+            if category == 0:
+                other = other + 1
+        mirex_score = (1 * correct) + (0.5 * fifths) + (0.3 * relative) + (0.2 * parallel)
+
+        return torch.tensor(mirex_score/samples).float(), torch.tensor(correct/samples).float(), torch.tensor(fifths/samples).float(), torch.tensor(relative/samples).float(), torch.tensor(parallel/samples).float(), torch.tensor(other/samples).float(), torch.tensor(accuracy/samples).float()
+
+class PitchClassNet_Multi(pl.LightningModule):
+    
+    def __init__(self, pitches1, pitches2, pitch_classes, num_layers, kernel_size, opt=None, window_size=23, batch_size=4, train_set=None, val_set=None):
+        super().__init__()
+        self.pitches1 = pitches1
+        self.pitches2 = pitches2
+        self.pitch_classes = pitch_classes
+        self.num_layers = num_layers
+        self.kernel_size = kernel_size
+        self.batch_size = batch_size
+        self.window_size = window_size
+        self.opt = opt
+        self.conv_layers = opt.conv_layers
+        self.n_filters = opt.n_filters
+        self.resblock = opt.resblock
+        self.denseblock = opt.denseblock
+        self.data = {'train': train_set,
+                     'val': val_set}
+        
+        ########################################################################
+        # Initialize Model:                                               #
+        ########################################################################
+        # Two models for two different scales:
+            # First scale only on tone level input
+            # Second inputs is encoded on semitone level
+        self.model1 = PitchClassNet(self.pitches1, self.pitch_classes, self.num_layers, self.kernel_size, opt=self.opt, window_size=window_size, batch_size=batch_size, train_set=train_set, val_set=val_set).double().cuda()
+        opt2 = copy.deepcopy(opt)
+        opt2.no_semitones = True
+        self.model2 = PitchClassNet(self.pitches2, self.pitch_classes, self.num_layers, self.kernel_size, opt=opt2, window_size=window_size, batch_size=batch_size, train_set=train_set, val_set=val_set).double().cuda()
+        
+        if self.opt.linear_reg_multi:
+            self.wk = torch.randn(2, 12, requires_grad=True, device="cuda")
+            self.wt = torch.randn(2, 12, requires_grad=True, device="cuda")
+            self.bk = torch.randn(12, requires_grad=True, device="cuda")
+            self.bt = torch.randn(12, requires_grad=True, device="cuda")
+            if self.opt.genre:
+                self.wg = torch.randn(2, 12, requires_grad=True, device="cuda")
+                self.bg = torch.randn(12, requires_grad=True, device="cuda")
+            self.sig = nn.Sigmoid()
+    
+    def forward(self, mel1, mel2, seq_length):
+        
+        x1 = self.model1.forward(mel1, seq_length)
+        x2 = self.model2.forward(mel2, seq_length)
+        
+        if self.opt.genre:
+            key_out1, tonic_out1, genre_out1 = x1
+            key_out2, tonic_out2, genre_out2 = x2
+        else:
+            key_out1, tonic_out1 = x1
+            key_out2, tonic_out2 = x2
+        
+        # Combine x1 and x2 to x!!!!
+        # Linear Regression version:
+        if self.opt.linear_reg_multi:
+            key_out = self.wk[0]*key_out1 + self.wk[1]*key_out2 + self.bk
+            tonic_out = self.wt[0]*tonic_out1 + self.wt[1]*tonic_out2 + self.bt
+            key_out = self.sig(key_out)
+            if self.opt.genre:
+                genre_out = self.wg[0]*genre_out1 + self.wg[1]*genre_out2 + self.bg
+        else: # Simple averaging variant
+            key_out = (key_out1+key_out2)/2
+            tonic_out = (tonic_out1+tonic_out2)/2
+            if self.opt.genre:
+                genre_out = (genre_out1+genre_out2)/2
+        
+        if self.opt.genre:
+            x = (key_out, tonic_out, genre_out)
+        else:
+            x = (key_out, tonic_out)
+
+        return x
+
+    def general_step(self, batch, batch_idx, mode):
+        
+        mel1 = batch['mel']
+        mel2 = batch['mel2']
+        key_signature_id = batch['key_signature_id']
+        key_labels = batch['key_labels'].double()
+        tonic_labels = batch['tonic_labels'].long()
+        genre_labels = batch['genre'].long()
+        tonic_labels_idx = torch.argmax(tonic_labels,axis=1)
+        genre_labels_idx = torch.argmax(genre_labels,axis=1)
+
+        if self.opt.genre:
+            # create mask for genre loss
+            # shall ignore missing genre labels
+            genre_mask = torch.sum(genre_labels, axis=1)==1
+        
+        if self.opt.local or self.opt.frames>0:
+            seq_length = batch['seq_length']
+        # forward pass
+        if self.opt.frames>0:
+            out = self.forward(mel1, mel2, seq_length)
+        else:
+            out = self.forward(mel1, mel2, None)
+        if self.opt.genre:
+            key_out, tonic_out, genre_out = out
+        else:
+            key_out, tonic_out = out
+        
+        # loss
+        loss_func = nn.BCELoss()
+        loss_func_tonic = nn.CrossEntropyLoss()
+        loss_func_genre = nn.CrossEntropyLoss()
+        bce_loss = 0
+        tonic_loss = 0
+        genre_loss = 0
+        
+        if self.opt.local: # for local key estimation
+            if self.opt.genre:
+                genre_out = genre_out.reshape(genre_out.shape[0], genre_out.shape[2], genre_out.shape[1])
+            for i in range(mel.shape[0]):
+                bce_loss = bce_loss + loss_func(key_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], key_labels[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:])
+                tonic_loss = tonic_loss + loss_func_tonic(tonic_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], tonic_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1)])
+                if self.opt.genre:
+                    genre_out = genre_out[genre_mask]
+                    genre_labels_idx = genre_labels_idx[genre_mask]
+                    if torch.sum(genre_mask)==0:
+                        genre_loss = torch.zeros(1)
+                    else:
+                        genre_loss = genre_loss + loss_func_genre(genre_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1),:], genre_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames)+1)])
+                        genre_loss = genre_loss/mel.shape[0]
+            bce_loss = bce_loss/mel.shape[0]
+            tonic_loss = tonic_loss/mel.shape[0]
+        else:
+            bce_loss = loss_func(key_out, key_labels) # for global key estimation
+            tonic_loss = loss_func_tonic(tonic_out, tonic_labels_idx)
+            if self.opt.genre:
+                genre_out = genre_out[genre_mask]
+                genre_labels_idx = genre_labels_idx[genre_mask]
+                genre_loss = loss_func_genre(genre_out, genre_labels_idx)
+
+        if self.opt.use_cos:
+            cosine_sim_func = nn.CosineSimilarity(dim=1)
+            cosine_sim = cosine_sim_func(key_out, key_labels)
+            
+        loss = self.opt.key_weight*bce_loss + self.opt.tonic_weight*tonic_loss
+        
+        if self.opt.genre:
+            if torch.sum(genre_mask)!=0:
+                loss += self.opt.genre_weight*genre_loss
+    
+        if self.opt.use_cos:
+            loss += (1 - torch.sum(cosine_sim)/key_out.shape[0])
+        
+        if self.opt.local: # for local key estimation
+            mirex, correct, fifths, relative, parallel, other, accuracy, accuracy_tonic, accuracy_genre = 0,0,0,0,0,0,0,0,0
+            for i in range(mel.shape[0]):
+                mirex_sub, correct_sub, fifths_sub, relative_sub, parallel_sub, other_sub, accuracy_sub = self.mirex_score(key_labels[i,:(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], key_out[i,:(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], tonic_labels[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], tonic_out[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:], key_signature_id[i, :(seq_length[i]-self.opt.loc_window_size*self.opt.frames+1),:])
+                mirex, correct, fifths, relative, parallel, other, accuracy = mirex+mirex_sub, correct+correct_sub, fifths+fifths_sub, relative+relative_sub, parallel+parallel_sub, other+other_sub, accuracy+accuracy_sub
+                Accuracy_tonic = Accuracy().cuda()
+                accuracy_tonic = accuracy_tonic + Accuracy_tonic(torch.argmax(tonic_out[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1)),:],axis=1), tonic_labels_idx[i,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))]) 
+                if self.opt.genre:
+                    if torch.sum(genre_mask)==0:
+                        accuracy_genre = torch.tensor(0.0).float()
+                    else:
+                        Accuracy_genre = Accuracy().cuda()
+                        accuracy_genre = accuracy_genre + Accuracy_genre(torch.argmax(genre_out[i,:,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))],axis=1), genre_labels_idx[i,:,:(seq_length[i]-(self.opt.loc_window_size*self.opt.frames+1))])
+            mirex, correct, fifths, relative, parallel, other, accuracy, accuracy_tonic, accuracy_genre = torch.tensor(mirex/mel.shape[0]).clone().float(), torch.tensor(correct/mel.shape[0]).clone().float(), torch.tensor(fifths/mel.shape[0]).clone().float(), torch.tensor(relative/mel.shape[0]).clone().float(), torch.tensor(parallel/mel.shape[0]).clone().float(), torch.tensor(other/mel.shape[0]).clone().float(), torch.tensor(accuracy/mel.shape[0]).clone().float(), torch.tensor(accuracy_tonic/mel.shape[0]).clone().float(), torch.tensor(accuracy_genre/mel.shape[0]).clone().float()
+        else:
+            mirex, correct, fifths, relative, parallel, other, accuracy = self.mirex_score(key_labels, key_out, tonic_labels, tonic_out, key_signature_id)
+            Accuracy_tonic = Accuracy().cuda()
+            accuracy_tonic = Accuracy_tonic(torch.argmax(tonic_out,axis=1), tonic_labels_idx)
+            if self.opt.genre:
+                # shall prevent error for datasets with missing genre labels
+                # simply ignore the genre accuracy for those
+                if torch.sum(genre_mask)==0:
+                    accuracy_genre = torch.tensor(0.0).float()
+                else:
+                    Accuracy_genre = Accuracy().cuda()
+                    accuracy_genre = Accuracy_genre(torch.argmax(genre_out,axis=1), genre_labels_idx)
+            else:
+                accuracy_genre = torch.tensor(0.0).float()
+            
+        return loss, accuracy, mirex, correct, fifths, relative, parallel, other, accuracy_tonic, accuracy_genre
+
+    def general_end(self, outputs, mode):
+
+        # average over all batches aggregated during one epoch
+        avg_loss = torch.stack([x[mode + '_loss'] for x in outputs]).mean()
+        acc = torch.stack(
+            [x[mode + '_accuracy'] for x in outputs]).mean()
+        mirex_score = torch.stack(
+            [x[mode + '_mirex_score'] for x in outputs]).mean()
+        correct = torch.stack(
+            [x[mode + '_correct'] for x in outputs]).mean()
+        fifths = torch.stack(
+            [x[mode + '_fifths'] for x in outputs]).mean()
+        relative = torch.stack(
+            [x[mode + '_relative'] for x in outputs]).mean()
+        parallel = torch.stack(
+            [x[mode + '_parallel'] for x in outputs]).mean()
+        other = torch.stack(
+            [x[mode + '_other'] for x in outputs]).mean()
+        acc_tonic = torch.stack(
+            [x[mode + '_accuracy_tonic'] for x in outputs]).mean()
+        acc_genre = torch.stack(
+            [x[mode + '_accuracy_genre'] for x in outputs]).mean()
+        return avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre
+
+    def training_step(self, batch, batch_idx):
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "train")
+        tensorboard_logs = {'loss': loss}
+        should_log = False
+        if batch_idx % self.trainer.accumulate_grad_batches == 0:
+            should_log = (
+                    (self.global_step + 1) % self.opt.acc_grad == 0
+                    )
+        if should_log:
+            self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
+
+        return {'loss': loss, 'train_accuracy': accuracy, 'train_mirex_score': mirex_score, 'train_correct': correct, 'train_fifths': fifths, 'train_relative': relative, 'train_parallel': parallel, 'train_other': other, 'train_accuracy_tonic': acc_tonic, 'train_accuracy_genre': acc_genre, 'log': tensorboard_logs}
+
+    def validation_step(self, batch, batch_idx):
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "val")
+        return {'val_loss': loss, 'val_accuracy': accuracy, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre}
+
+    def test_step(self, batch, batch_idx):
+        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_step(batch, batch_idx, "test")
+        return {'test_loss': loss, 'test_accuracy': accuracy, 'test_mirex_score': mirex_score, 'train_correct': correct, 'test_fifths': fifths, 'test_relative': relative, 'test_parallel': parallel, 'test_other': other, 'test_accuracy_tonic': acc_tonic, 'test_accuracy_genre': acc_genre}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic, acc_genre = self.general_end(outputs, "val")
+        print("Val-Loss={}".format(avg_loss))
+        print("Val-Acc={}".format(acc))
+        print("Val-Acc_Tonic={}".format(acc_tonic))
+        if self.opt.genre:
+            print("Val-Acc_Genre={}".format(acc_genre))
+        print("Val-Mirex_Score={}".format(mirex_score))
+        self.log("val_loss", avg_loss)
+        self.log("val_accuracy", acc)
+        self.log("val_mirex_score", mirex_score)
+        self.log("val_correct", correct)
+        self.log("val_fifths", fifths)
+        self.log("val_relative", relative)
+        self.log("val_parallel", parallel)
+        self.log("val_other", other)
+        self.log("val_accuracy_tonic", acc_tonic)
+        self.log("val_accuracy_genre", acc_genre)
+        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
+        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
+        self.logger.experiment.add_scalar("val_mirex_score", mirex_score, self.global_step)
+        self.logger.experiment.add_scalar("val_correct", correct, self.global_step)
+        self.logger.experiment.add_scalar("val_fifths", fifths, self.global_step)
+        self.logger.experiment.add_scalar("val_relative", relative, self.global_step)
+        self.logger.experiment.add_scalar("val_parallel", parallel, self.global_step)
+        self.logger.experiment.add_scalar("val_other", other, self.global_step)
+        self.logger.experiment.add_scalar("val_accuracy_tonic", acc_tonic, self.global_step)
+        self.logger.experiment.add_scalar("val_accuracy_genre", acc_genre, self.global_step)
+        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre}
+        return {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'val_accuracy_genre': acc_genre, 'log': tensorboard_logs}
+    
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.data['val'], shuffle=False, batch_size=self.batch_size, drop_last=True, pin_memory=True, num_workers=12)
+
+    def test_dataloader(self):
+        return torch.utils.data.DataLoader(self.data['test'], shuffle = False, batch_size=self.batch_size)
+    
+    def configure_optimizers(self):
+
+        params = list(self.model1.parameters()) + list(self.model2.parameters())
+        if self.opt.linear_reg_multi:
+            params  = params + [self.wk, self.bk, self.wt, self.bt] + list(self.sig.parameters())
+            if self.opt.genre:
+                params = params + [self.wg, self.bg]
+        
         optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
 
@@ -957,18 +1406,6 @@ class AttentionPitchClassNet(pl.LightningModule):
             #print("Label: "+str(label_key[:12]))
             #print("Pred: "+str(y_pred_keys))
         return tf.convert_to_tensor((score / (samples*12)))
-    
-    # needs to be tested!!!
-    def genre_accuracy(y_true, y_pred):
-        samples, score = 0, 0
-        for i in range(len(y_true)):
-            y_pred_genre = y_pred[i]
-            y_true_genre = y_true[i]
-            if torch.argmax(y_pred_genre)==torch.argmax(y_true_genre):
-                score += 1
-            samples += 1
-        
-        return torch.tensor((score/samples))
 
     def mirex_score(self, key_labels, key_preds, tonic_labels, tonic_preds, key_signature_id):
         score, accuracy, samples = 0, 0, 0
@@ -1020,1080 +1457,5 @@ class AttentionPitchClassNet(pl.LightningModule):
             if category == 0:
                 other = other + 1
         mirex_score = (1 * correct) + (0.5 * fifths) + (0.3 * relative) + (0.2 * parallel)
-        
-        '''
-        score = score / (samples * 12)
-        accuracy = accuracy / samples
-        print(f'dataset accuracy:')
-        print(f'Correctly classified single keys: {score:.2%}')
-        print(f'Correctly classified songs (all keys): {accuracy:.2%}')
-        print(f'Avg. Cosine Similarity: {similarity / samples:.2%}')
-        print(f'Fifths: {fifths / samples:.2%}')
-        print(f'Correct tonics: {correct_tonics_total / samples:.2%}')
-        print(f'All correct: {correct / samples:.2%}')
-        print(f'Others: {others / samples:.2%}')
-        print(f'MiReX Score: {mirex_score / samples:.2%}')
-        '''
-        
+
         return torch.tensor(mirex_score/samples).float(), torch.tensor(correct/samples).float(), torch.tensor(fifths/samples).float(), torch.tensor(relative/samples).float(), torch.tensor(parallel/samples).float(), torch.tensor(other/samples).float(), torch.tensor(accuracy/samples).float()
-
-
-    
-class TestNet(pl.LightningModule):
-    
-    def __init__(self, pitches, pitch_classes, num_layers, kernel_size, opt=None, window_size=23, batch_size=4, train_set=None, val_set=None):
-        super().__init__()
-        # set hyperparams
-        #self.hparams.update(hparams)
-        self.pitches = pitches
-        self.pitch_classes = pitch_classes
-        self.num_layers = num_layers
-        self.kernel_size = kernel_size
-        self.batch_size = batch_size
-        self.window_size = window_size
-        self.opt = opt
-        self.conv_layers = opt.conv_layers
-        self.n_filters = opt.n_filters
-        self.resblock = opt.resblock
-        self.data = {'train': train_set,
-                     'val': val_set}
-        
-        ########################################################################
-        # Initialize Model:                                               #
-        ########################################################################
-        
-        self.model = nn.Sequential(
-            nn.Conv2d(in_channels=1,out_channels=16,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=16,out_channels=16,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=16,out_channels=16,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,3)),
-            #Pitch2PitchClassPool(pitch_classes = 60, pitches_in = 180, kernel_depth = 1, padding_value = float('inf')),
-            nn.AvgPool2d(kernel_size=(3,1)),
-            #nn.MaxPool2d(kernel_size=(3,1)),
-            
-            nn.Conv2d(in_channels=16,out_channels=32,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=32,out_channels=32,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=32,out_channels=32,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=32,out_channels=32,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,3)),
-            Pitch2PitchClassPool(pitch_classes = 12, pitches_in = 60, kernel_depth = 1, padding_value = float('inf')),
-            
-            nn.Conv2d(in_channels=32,out_channels=64,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=64,out_channels=64,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=64,out_channels=64,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,4)),
-            #Pitch2PitchClassPool(pitch_classes = 12, pitches_in = 30, kernel_depth = 1, padding_value = float('inf')),
-            
-            nn.Conv2d(in_channels=64,out_channels=80,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(80),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=80,out_channels=80,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(80),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=80,out_channels=80,kernel_size=self.kernel_size,padding=self.kernel_size//2,padding_mode="circular"),
-            nn.BatchNorm2d(80),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=80, out_channels=1, kernel_size=1),
-            
-            )
-
-    
-    def forward(self, mel):
-        
-        pc = self.model(mel)
-        if self.opt.local: # for local key estimation
-            x = pc.reshape(pc.shape[0], pc.shape[2], pc.shape[3])
-        else: # for global key estimation
-            #x = pc.reshape(pc.shape[0], pc.shape[2])
-            pc = torch.mean(pc, axis=-1)
-            pc = nn.Flatten()(pc)
-            pc = nn.Sigmoid()(pc)
-            x = pc
-        
-        return x
-
-    def general_step(self, batch, batch_idx, mode):
-        
-        mel = batch['mel']
-        key_signature_id = batch['key_signature_id']
-        key_labels = batch['key_labels'].double()
-        if self.opt.local:
-            seq_length = batch['seq_length']
-        # forward pass
-        out = self.forward(mel)
-        
-        # loss
-        loss_func = nn.BCELoss()
-        bce_loss = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                
-                bce_loss = bce_loss + loss_func(out[i,:,:(seq_length[i]-self.window_size+1)], key_labels[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            bce_loss = loss_func(out, key_labels) # for global key estimation
-            
-        cosine_sim_func = nn.CosineSimilarity(dim=1)
-        cosine_sim = cosine_sim_func(out, key_labels)
-        loss = bce_loss# + (1 - torch.sum(cosine_sim)/out.shape[0])
-        accuracy = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                accuracy = accuracy + self.all_key_accuracy_local(key_labels[i,:,:(seq_length[i]-self.window_size+1)], out[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            accuracy = self.all_key_accuracy(key_labels, out)# for global key estimation
-        
-            
-        return loss, accuracy
-
-    def general_end(self, outputs, mode):
-        # average over all batches aggregated during one epoch
-        avg_loss = torch.stack([x[mode + '_loss'] for x in outputs]).mean()
-        acc = torch.stack(
-            [x[mode + '_accuracy'] for x in outputs]).mean()
-        return avg_loss, acc
-
-    def training_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "train")
-        tensorboard_logs = {'loss': loss}
-        should_log = False
-        if batch_idx % self.trainer.accumulate_grad_batches == 0:
-            should_log = (
-                    (self.global_step + 1) % self.opt.acc_grad == 0
-                    )
-        if should_log:
-            self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
-
-        return {'loss': loss, 'train_accuracy': accuracy, 'log': tensorboard_logs}
-
-    def validation_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "val")
-        return {'val_loss': loss, 'val_accuracy': accuracy}
-
-    def test_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "test")
-        return {'test_loss': loss, 'test_accuracy': accuracy}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss, acc = self.general_end(outputs, "val")
-        print("Val-Loss={}".format(avg_loss))
-        print("Val-Acc={}".format(acc))
-        self.log("val_loss", avg_loss)
-        self.log("val_accuracy", acc)
-        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
-        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc}
-        return {'val_loss': avg_loss, 'val_acc': acc, 'log': tensorboard_logs}
-    
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['val'], shuffle=False, batch_size=self.batch_size, drop_last=True, pin_memory=True, num_workers=12)
-
-    def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['test'], shuffle = False, batch_size=self.batch_size)
-    
-    def configure_optimizers(self):
-
-        params = list(self.model.parameters())# + list(self.classifier.parameters())
-            
-        optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
-
-        return [optim], [scheduler]
-    
-    def all_key_accuracy(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        for i in range(len(y_true)):
-            y_pred_keys = y_pred[i]
-            y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-            label_key = y_true[i]
-            correct_keys = torch.sum(y_pred_keys == label_key)
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-    def all_key_accuracy_local(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        #for i in range(len(y_true)):
-        y_pred_keys = y_pred
-        y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-        label_key = y_true
-        correct_keys = torch.sum(y_pred_keys == label_key)
-        score = score + correct_keys
-        accuracy = accuracy + (1 if correct_keys == 12 else 0)
-        samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-class TestCNN(pl.LightningModule):
-     
-    def __init__(self, pitches, pitch_classes, num_layers, kernel_size, opt=None, window_size=23, batch_size=4, train_set=None, val_set=None):
-         super().__init__()
-         self.pitches = pitches
-         self.pitch_classes = pitch_classes
-         self.num_layers = num_layers
-         self.kernel_size = kernel_size
-         self.batch_size = batch_size
-         self.window_size = window_size
-         self.opt = opt
-         self.data = {'train': train_set,
-                      'val': val_set}
-
-         self.model = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(4),
-            nn.Conv2d(4, 4, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(4),
-            nn.Conv2d(4, 4, kernel_size=(2,2), dilation=(36,1)),
-            nn.LeakyReLU(),
-            nn.MaxPool2d(kernel_size=(1,2)),
-            nn.BatchNorm2d(4),
-            nn.Conv2d(4, 8, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 8, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 8, kernel_size=(2,2), dilation=(36,1)),
-            nn.LeakyReLU(),
-            nn.MaxPool2d(kernel_size=(1,2)),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 16, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(16),
-            nn.Conv2d(16, 16, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(16),
-            nn.Conv2d(16, 16, kernel_size=(2,2), dilation=(36,1)),
-            nn.LeakyReLU(),
-            nn.MaxPool2d(kernel_size=(1,2)),
-            nn.BatchNorm2d(16),
-            nn.Conv2d(16, 16, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(16),
-            nn.Conv2d(16, 16, kernel_size=(37,1)),
-            nn.LeakyReLU(),
-            nn.MaxPool2d(kernel_size=(1,2)),
-            nn.BatchNorm2d(16),
-            
-            nn.Conv2d(16, 32, kernel_size=(3,1), padding=(1,0)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32, 32, kernel_size=(3,3), stride=(3,1)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(32),
-            
-            #nn.Conv2d(32, 32, kernel_size=(3,1)), ###### Addition start
-            #nn.LeakyReLU(),
-            #nn.BatchNorm2d(32),
-            #nn.Conv2d(32, 32, kernel_size=(3,1), stride=(4,1)),
-            #nn.LeakyReLU(),
-            #nn.BatchNorm2d(32),
-            #nn.Conv2d(32, 32, kernel_size=(3,1)),
-            #nn.LeakyReLU(),
-            #nn.BatchNorm2d(32),
-            #nn.Conv2d(32, 32, kernel_size=(3,1)),
-            #nn.LeakyReLU(),
-            #nn.BatchNorm2d(32),
-            #nn.Conv2d(32, 32, kernel_size=(3,1)),
-            #nn.LeakyReLU(),
-            #nn.BatchNorm2d(32), ######### Addition end
-            
-            nn.Conv2d(32, 1, kernel_size=(1,1)),
-            nn.LeakyReLU(),
-            nn.BatchNorm2d(1),
-            nn.Conv2d(1, 1, kernel_size=(1,34)),
-            nn.Flatten(),
-            nn.Sigmoid(),
-            ).double().cuda()
-        
-    def forward(self, mel):
-        x = self.model(mel)
-        #x = x.reshape(x.shape[0], x.shape[2]) # for global key estimation
-        #x = nn.Sigmoid()(x)
-        
-        
-        
-        return x
-
-    def general_step(self, batch, batch_idx, mode):
-        
-        mel = batch['mel']
-        key_signature_id = batch['key_signature_id']
-        key_labels = batch['key_labels'].double()
-        if self.opt.local:
-            seq_length = batch['seq_length']
-        # forward pass
-        out = self.forward(mel)
-        
-        # loss
-        loss_func = nn.BCELoss()
-        bce_loss = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                
-                bce_loss = bce_loss + loss_func(out[i,:,:(seq_length[i]-self.window_size+1)], key_labels[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            bce_loss = loss_func(out, key_labels) # for global key estimation
-            
-        cosine_sim_func = nn.CosineSimilarity(dim=1)
-        cosine_sim = cosine_sim_func(out, key_labels)
-        loss = bce_loss + (1 - torch.sum(cosine_sim)/out.shape[0])
-        accuracy = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                accuracy = accuracy + self.all_key_accuracy_local(key_labels[i,:,:(seq_length[i]-self.window_size+1)], out[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            accuracy = self.all_key_accuracy(key_labels, out)# for global key estimation
-            
-        return loss, accuracy
-
-    def general_end(self, outputs, mode):
-        # average over all batches aggregated during one epoch
-        avg_loss = torch.stack([x[mode + '_loss'] for x in outputs]).mean()
-        acc = torch.stack(
-            [x[mode + '_accuracy'] for x in outputs]).mean()
-        return avg_loss, acc
-
-    def training_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "train")
-        tensorboard_logs = {'loss': loss}
-        should_log = False
-        if batch_idx % self.trainer.accumulate_grad_batches == 0:
-            should_log = (
-                    (self.global_step + 1) % self.opt.acc_grad == 0
-                    )
-        if should_log:
-            self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
-
-        return {'loss': loss, 'train_accuracy': accuracy, 'log': tensorboard_logs}
-
-    def validation_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "val")
-        return {'val_loss': loss, 'val_accuracy': accuracy}
-
-    def test_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "test")
-        return {'test_loss': loss, 'test_accuracy': accuracy}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss, acc = self.general_end(outputs, "val")
-        print("Val-Loss={}".format(avg_loss))
-        print("Val-Acc={}".format(acc))
-        self.log("val_loss", avg_loss)
-        self.log("val_accuracy", acc)
-        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
-        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc}
-        return {'val_loss': avg_loss, 'val_acc': acc, 'log': tensorboard_logs}
-    
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['val'], shuffle=False, batch_size=self.batch_size, drop_last=True, pin_memory=True, num_workers=12)
-
-    def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['test'], shuffle = False, batch_size=self.batch_size)
-    
-    def configure_optimizers(self):
-
-        params = list(self.model.parameters())
-            
-        optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
-        #scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
-        #scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=40, gamma=0.9)
-        
-        return [optim]#, [scheduler]
-    
-    def all_key_accuracy(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        for i in range(len(y_true)):
-            y_pred_keys = y_pred[i]
-            y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-            label_key = y_true[i]
-            correct_keys = torch.sum(y_pred_keys == label_key)
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-    
-class KeyEncoder(nn.Module):
-    def __init__(self, nf, in_channels):
-        super().__init__()
-        self.in_channels = in_channels if in_channels>0 else 1
-        self.preprocess1 = nn.Sequential(
-            #nn.Conv2d(1, nf, kernel_size=(3, 3),padding=1, padding_mode='circular'),
-            nn.Conv2d(self.in_channels, nf, kernel_size=(3, 3),padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(nf),
-            nn.Conv2d(nf, nf, kernel_size=(3, 3),padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(nf),
-        ).double().cuda()
-        self.combineOctaves1 = CombineOctavesNet(nf).double().cuda()
-        
-        self.preprocess2 = nn.Sequential(
-            nn.Conv2d(nf, 2*nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(2*nf),
-            nn.Conv2d(2*nf, 2*nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(2*nf)
-        ).double().cuda()
-        self.combineOctaves2 = CombineOctavesNet(2 * nf).double().cuda()
-
-        self.midiNoteBinNet = nn.Sequential(
-            nn.Conv2d(2*nf, 4*nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            nn.Conv2d(4*nf, 4*nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            #nn.Conv2d(4*nf, 4*nf, kernel_size=(3, 3), stride=(3, 1)),
-            nn.Conv2d(4*nf, 4*nf, kernel_size=(3, 3), stride=(3, 1), padding=(0,1),padding_mode='circular'),
-            nn.ELU(),
-            #nn.MaxPool2d(kernel_size=(1, 2)),
-        ).double().cuda()
-        
-    def forward(self, x: Tensor) -> Tensor:
-        
-        x = self.preprocess1(x)
-
-        z1 = self.combineOctaves1(x[:, :, :72, :])
-        z2 = self.combineOctaves1(x[:, :, 72:144, :])
-        z3 = self.combineOctaves1(x[:, :, 144:216, :])
-        z4 = self.combineOctaves1(x[:, :, 216:, :])
-        x = torch.cat([z1, z2, z3, z4], 2)
-
-        x = self.preprocess2(x)
-
-        z1 = self.combineOctaves2(x[:, :, :72, :])
-        z2 = self.combineOctaves2(x[:, :, 72:144, :])
-        x = torch.cat([z1, z2], 2)
-
-        return self.midiNoteBinNet(x)
-    
-class CombineOctavesNet(nn.Module):
-    def __init__(self, nf):
-        super().__init__()
-        octaves = 2
-
-        self.model = nn.Sequential(
-            nn.Conv2d(nf, nf, kernel_size=(octaves, 1), dilation=(36, 1), bias=False),
-            nn.ELU(),
-            #nn.MaxPool2d(kernel_size=(1, 2)),
-        ).double().cuda()
-        shape = self.model[0].weight.shape
-        self.model[0].weight = torch.nn.Parameter(torch.ones(shape).double().cuda())
-        #print(self.p2pc[6].weight)
-        
-    def forward(self, x: Tensor) -> Tensor:
-        return self.model(x)
-    
-class KeySignatureEncoder(nn.Module):
-    def __init__(self, nf, out_channels):
-        super().__init__()
-        self.out_channels = out_channels
-        self.model = nn.Sequential(
-            nn.Conv2d(4*nf, 4 * nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            nn.Conv2d(4*nf, 4 * nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            nn.Conv2d(4*nf, 8 * nf, kernel_size=(13, 1)),
-            nn.ELU(),
-            nn.BatchNorm2d(8*nf),
-            nn.Conv2d(8*nf, 1, 1,),
-            #nn.Conv2d(8*nf, self.out_channels, 1,),
-            #nn.LeakyReLU(),
-            nn.ELU(),
-            #layers.Lambda(lambda x: tf.reduce_mean(x, 2)),
-            #nn.Flatten(),
-            #nn.Sigmoid(),
-        ).double().cuda()
-        shape = self.model[6].weight.shape
-        initializer = tf.keras.initializers.Orthogonal()
-        weights = torch.nn.Parameter(torch.tensor(initializer(shape=shape).numpy()).double().cuda())
-        self.model[6].weight = weights
-        
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.model(x)
-        x = torch.mean(x,3)
-        x = nn.Flatten()(x)
-        x = nn.Sigmoid()(x)
-        return x
-    
-class TonicEncoder(nn.Module):
-    def __init__(self, nf, out_channels):
-        super().__init__()
-        self.out_channels = out_channels
-        self.model = nn.Sequential(
-            nn.Conv2d(4*nf, 4 * nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            nn.Conv2d(4*nf, 4 * nf, kernel_size=(3, 3), padding=1, padding_mode='circular'),
-            nn.ELU(),
-            nn.BatchNorm2d(4*nf),
-            nn.Conv2d(4*nf, 8 * nf, kernel_size=(13, 1)),
-            nn.ELU(),
-            nn.BatchNorm2d(8*nf),
-            nn.Conv2d(8*nf, 1, 1,),
-            #nn.Conv2d(8*nf, self.out_channels, 1,),
-            #nn.LeakyReLU(),
-            nn.ELU(),
-            #layers.Lambda(lambda x: tf.reduce_mean(x, 2)),
-            #nn.Flatten(),
-            #nn.Sigmoid(),
-        ).double().cuda()
-        shape = self.model[6].weight.shape
-        initializer = tf.keras.initializers.Orthogonal()
-        weights = torch.nn.Parameter(torch.tensor(initializer(shape=shape).numpy()).double().cuda())
-        self.model[6].weight = weights
-        
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.model(x)
-        x = torch.mean(x,3)
-        x = nn.Flatten()(x)
-        x = nn.Sigmoid()(x)
-        return x
-    
-    
-class EquivariantDilatedLayer(nn.Module):
-    def __init__(self, nf, in_channels, out_channels):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.nf = nf
-        
-        self.key_encoder = KeyEncoder(self.nf, self.in_channels)
-        self.key_signature_encoder = KeySignatureEncoder(self.nf, self.out_channels)
-        #self.tonic_encoder = TonicEncoder(activation, nf, d_rate)
-        self.tonic_encoder = TonicEncoder(self.nf, self.out_channels)
-        
-    def forward(self, x: Tensor) -> Tensor:
-        # The shared network part
-        z = self.key_encoder(x)
-        # The two network heads
-        key_signature = self.key_signature_encoder(z)
-        tonic = self.tonic_encoder(z)
-        
-        return key_signature, tonic
-    
-class EquivariantDilatedModel(pl.LightningModule):
-    def __init__(self, nf, batch_size=None, opt=None, train_set=None,val_set=None):
-        super().__init__()
-        self.batch_size = batch_size
-        self.opt = opt
-        self.data = {'train': train_set,
-                     'val': val_set}
-        
-        self.key_encoder = KeyEncoder(nf, 0)
-        self.key_signature_encoder = KeySignatureEncoder(nf, 0)
-        #self.tonic_encoder = TonicEncoder(activation, nf, d_rate)
-        self.tonic_encoder = TonicEncoder(nf, 0)
-        
-    def forward(self, x: Tensor) -> Tensor:
-        # The shared network part
-        z = self.key_encoder(x)
-        # The two network heads
-        key_signature = self.key_signature_encoder(z)
-        tonic = self.tonic_encoder(z)
-        
-        return key_signature, tonic
-    
-    def general_step(self, batch, batch_idx, mode):
-        
-        mel = batch['mel']
-        key_signature_id = batch['key_signature_id']
-        key_labels = batch['key_labels'].double()
-        tonic_labels = batch['tonic_labels'].long()
-        tonic_labels_idx = torch.argmax(tonic_labels,axis=1)
-        
-        if self.opt.local:
-            seq_length = batch['seq_length']
-        # forward pass
-        out = self.forward(mel)
-        key_out, tonic_out = out
-        
-        # loss
-        loss_func = nn.BCELoss()
-        loss_func_tonic = nn.CrossEntropyLoss()
-        bce_loss = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                
-                bce_loss = bce_loss + loss_func(key_out[i,:,:(seq_length[i]-self.window_size+1)], key_labels[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            bce_loss = loss_func(key_out, key_labels) # for global key estimation
-            tonic_loss = loss_func_tonic(tonic_out.detach().cpu(), tonic_labels_idx.detach().cpu())
-            
-        cosine_sim_func = nn.CosineSimilarity(dim=1)
-        cosine_sim = cosine_sim_func(key_out, key_labels)
-        loss = bce_loss + tonic_loss + (1 - torch.sum(cosine_sim)/key_out.shape[0])
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                accuracy = accuracy + self.all_key_accuracy_local(key_labels[i,:,:(seq_length[i]-self.window_size+1)], key_out[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            #accuracy = self.all_key_accuracy(key_labels, key_out)# for global key estimation
-            mirex, correct, fifths, relative, parallel, other, accuracy = self.mirex_score(key_labels, key_out, tonic_labels, tonic_out, key_signature_id)
-            Accuracy_tonic = Accuracy().cuda()
-            accuracy_tonic = Accuracy_tonic(torch.argmax(tonic_out,axis=1), tonic_labels_idx)
-            
-            
-        return loss, accuracy, mirex, correct, fifths, relative, parallel, other, accuracy_tonic
-
-    def general_end(self, outputs, mode):
-        # average over all batches aggregated during one epoch
-        avg_loss = torch.stack([x[mode + '_loss'] for x in outputs]).mean()
-        acc = torch.stack(
-            [x[mode + '_accuracy'] for x in outputs]).mean()
-        mirex_score = torch.stack(
-            [x[mode + '_mirex_score'] for x in outputs]).mean()
-        correct = torch.stack(
-            [x[mode + '_correct'] for x in outputs]).mean()
-        fifths = torch.stack(
-            [x[mode + '_fifths'] for x in outputs]).mean()
-        relative = torch.stack(
-            [x[mode + '_relative'] for x in outputs]).mean()
-        parallel = torch.stack(
-            [x[mode + '_parallel'] for x in outputs]).mean()
-        other = torch.stack(
-            [x[mode + '_other'] for x in outputs]).mean()
-        acc_tonic = torch.stack(
-            [x[mode + '_accuracy_tonic'] for x in outputs]).mean()
-        return avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic
-
-    def training_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "train")
-        tensorboard_logs = {'loss': loss}
-        should_log = False
-        if batch_idx % self.trainer.accumulate_grad_batches == 0:
-            should_log = (
-                    (self.global_step + 1) % self.opt.acc_grad == 0
-                    )
-        if should_log:
-            self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
-
-        return {'loss': loss, 'train_accuracy': accuracy, 'train_mirex_score': mirex_score, 'train_correct': correct, 'train_fifths': fifths, 'train_relative': relative, 'train_parallel': parallel, 'train_other': other, 'train_accuracy_tonic': acc_tonic, 'log': tensorboard_logs}
-
-    def validation_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "val")
-        return {'val_loss': loss, 'val_accuracy': accuracy, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic}
-
-    def test_step(self, batch, batch_idx):
-        loss, accuracy, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_step(batch, batch_idx, "test")
-        return {'test_loss': loss, 'test_accuracy': accuracy, 'test_mirex_score': mirex_score, 'train_correct': correct, 'test_fifths': fifths, 'test_relative': relative, 'test_parallel': parallel, 'test_other': other, 'test_accuracy_tonic': acc_tonic}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss, acc, mirex_score, correct, fifths, relative, parallel, other, acc_tonic = self.general_end(outputs, "val")
-        print("Val-Loss={}".format(avg_loss))
-        print("Val-Acc={}".format(acc))
-        print("Val-Acc_Tonic={}".format(acc_tonic))
-        print("Val-Mirex_Score={}".format(mirex_score))
-        self.log("val_loss", avg_loss)
-        self.log("val_accuracy", acc)
-        self.log("val_mirex_score", mirex_score)
-        self.log("val_correct", correct)
-        self.log("val_fifths", fifths)
-        self.log("val_relative", relative)
-        self.log("val_parallel", parallel)
-        self.log("val_other", other)
-        self.log("val_accuracy_tonic", acc_tonic)
-        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
-        self.logger.experiment.add_scalar("val_mirex_score", mirex_score, self.global_step)
-        self.logger.experiment.add_scalar("val_correct", correct, self.global_step)
-        self.logger.experiment.add_scalar("val_fifths", fifths, self.global_step)
-        self.logger.experiment.add_scalar("val_relative", relative, self.global_step)
-        self.logger.experiment.add_scalar("val_parallel", parallel, self.global_step)
-        self.logger.experiment.add_scalar("val_other", other, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy_tonic", acc_tonic, self.global_step)
-        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic}
-        return {'val_loss': avg_loss, 'val_acc': acc, 'val_mirex_score': mirex_score, 'val_correct': correct, 'val_fifths': fifths, 'val_relative': relative, 'val_parallel': parallel, 'val_other': other, 'val_accuracy_tonic': acc_tonic, 'log': tensorboard_logs}
-    
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['val'], shuffle=False, batch_size=self.batch_size, drop_last=True, pin_memory=True, num_workers=12)
-
-    def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['test'], shuffle = False, batch_size=self.batch_size)
-    
-    def configure_optimizers(self):
-
-        params = list(self.key_encoder.parameters()) + list(self.tonic_encoder.parameters()) + list(self.key_signature_encoder.parameters())# + list(self.classifier.parameters())
-            
-        optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
-
-        return [optim], [scheduler]
-    
-    def all_key_accuracy(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        for i in range(len(y_true)):
-            y_pred_keys = y_pred[i]
-            y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-            label_key = y_true[i]
-            correct_keys = torch.sum(y_pred_keys == label_key)
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-    def all_key_accuracy_local(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        #for i in range(len(y_true)):
-        y_pred_keys = y_pred
-        y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-        label_key = y_true
-        correct_keys = torch.sum(y_pred_keys == label_key)
-        score = score + correct_keys
-        accuracy = accuracy + (1 if correct_keys == 12 else 0)
-        samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-    # not functional yet!!!
-    def single_key_accuracy(y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        for i in range(len(y_true)):
-            y_pred_keys = y_pred[i]
-            y_pred_keys = tf.cast(y_pred_keys >= tf.sort(y_pred_keys)[-7], tf.float32)
-            label_key = y_true[i]
-            correct_keys = tf.math.reduce_sum(tf.cast(y_pred_keys == label_key[:12], tf.int32))
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-            #print("Label: "+str(label_key[:12]))
-            #print("Pred: "+str(y_pred_keys))
-        return tf.convert_to_tensor((score / (samples*12)))
-    
-    # needs to be tested!!!
-    def genre_accuracy(y_true, y_pred):
-        samples, score = 0, 0
-        for i in range(len(y_true)):
-            y_pred_genre = y_pred[i]
-            y_true_genre = y_true[i]
-            if torch.argmax(y_pred_genre)==torch.argmax(y_true_genre):
-                score += 1
-            samples += 1
-        
-        return torch.tensor((score/samples))
-
-    def mirex_score(self, key_labels, key_preds, tonic_labels, tonic_preds, key_signature_id):
-        score, accuracy, samples = 0, 0, 0
-        similarity = 0
-        correct_tonics_total = 0
-        mirex_score, correct, fifths, parallel, relative, other = 0, 0, 0, 0, 0, 0
-    
-        for i in range(len(key_labels)):
-            category = 0
-            key_label = key_labels[i]
-            key_pred_values = key_preds[i]
-            tonic_label = tonic_labels[i]
-            tonic_pred = tonic_preds[i]
-            KEY_SIGNATURE_MAP = torch.tensor(key_sig.KEY_SIGNATURE_MAP.numpy()).cuda()
-    
-            # Every Key signature contains 7 pitch classes so use top 7 pitch class predictions
-            #   Only major and minro are relevant for dataset
-    
-            # Find most similar cosine key signature given key predictions:
-            cosinesim = nn.CosineSimilarity(dim=1)
-            pred_key_id = torch.argmax(cosinesim(key_pred_values.reshape(1,key_pred_values.shape[0]), KEY_SIGNATURE_MAP))
-            key_pred = KEY_SIGNATURE_MAP[pred_key_id]
-            key_sig_label_id = torch.argmax(key_signature_id[i])
-            
-            # Check for relative fifths:
-            cosinesim2 = nn.CosineSimilarity(dim=0)
-            correct_keys = torch.sum(key_pred == key_label)
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-            similarity = similarity + cosinesim2(key_pred_values, key_label)
-            diff = torch.abs(pred_key_id - key_sig_label_id)
-            correct_tonic = 1 if torch.argmax(tonic_label) == torch.argmax(tonic_pred) else 0
-            tonic_diff = torch.abs(torch.argmax(tonic_label) - torch.argmax(tonic_pred))
-            correct_tonics_total = correct_tonics_total + correct_tonic
-    
-            if (diff == 1) and not(correct_tonic == 1 and correct_keys == 12):
-                fifths = fifths + 1
-                category = 1
-            if correct_tonic == 1 and correct_keys == 12 and category == 0:
-                correct = correct + 1
-                category = 1
-            if correct_keys == 12 and correct_tonic == 0 and category == 0:
-                relative = relative + 1
-                category = 1
-            if correct_tonic == 1 and correct_keys != 12 and category == 0:
-                parallel = parallel + 1
-                category = 1
-            if category == 0:
-                other = other + 1
-        mirex_score = (1 * correct) + (0.5 * fifths) + (0.3 * relative) + (0.2 * parallel)
-        
-        '''
-        score = score / (samples * 12)
-        accuracy = accuracy / samples
-        print(f'dataset accuracy:')
-        print(f'Correctly classified single keys: {score:.2%}')
-        print(f'Correctly classified songs (all keys): {accuracy:.2%}')
-        print(f'Avg. Cosine Similarity: {similarity / samples:.2%}')
-        print(f'Fifths: {fifths / samples:.2%}')
-        print(f'Correct tonics: {correct_tonics_total / samples:.2%}')
-        print(f'All correct: {correct / samples:.2%}')
-        print(f'Others: {others / samples:.2%}')
-        print(f'MiReX Score: {mirex_score / samples:.2%}')
-        '''
-        
-        return torch.tensor(mirex_score/samples).float(), torch.tensor(correct/samples).float(), torch.tensor(fifths/samples).float(), torch.tensor(relative/samples).float(), torch.tensor(parallel/samples).float(), torch.tensor(other/samples).float(), torch.tensor(accuracy/samples).float()
-
-    
-    
-class JXC1(pl.LightningModule):
-    
-    def __init__(self, pitches, pitch_classes, num_layers, kernel_size, opt=None, window_size=23, batch_size=4, train_set=None, val_set=None):
-        super().__init__()
-        # set hyperparams
-        #self.hparams.update(hparams)
-        self.pitches = pitches
-        self.pitch_classes = pitch_classes
-        self.num_layers = num_layers
-        self.kernel_size = kernel_size
-        self.batch_size = batch_size
-        self.window_size = window_size
-        self.opt = opt
-        self.conv_layers = opt.conv_layers
-        self.n_filters = opt.n_filters
-        self.resblock = opt.resblock
-        self.data = {'train': train_set,
-                     'val': val_set}
-        
-        ########################################################################
-        # Initialize Model:                                               #
-        ########################################################################
-        self.feature_extractor = nn.Sequential(
-            nn.Conv2d(in_channels=1,out_channels=16,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=16,out_channels=16,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=16,out_channels=16,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,3)),
-            
-            nn.Conv2d(in_channels=16,out_channels=32,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=32,out_channels=32,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=32,out_channels=32,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,3)),
-            
-            nn.Conv2d(in_channels=32,out_channels=64,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=64,out_channels=64,kernel_size=3,padding=1,padding_mode="circular"),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            
-            nn.MaxPool2d(kernel_size=(1,4)),
-            
-            nn.Conv2d(in_channels=64,out_channels=80,kernel_size=3, padding=(0,1),padding_mode="circular"),
-            nn.BatchNorm2d(80),
-            nn.ReLU(),
-            
-            nn.Conv2d(in_channels=80,out_channels=80,kernel_size=3, padding=(0,1),padding_mode="circular"),
-            nn.BatchNorm2d(80),
-            nn.ReLU(),
-            )
-        
-        self.bilstm = nn.LSTM(input_size=80*(opt.octaves*3*12-4), hidden_size=128, batch_first=True,bidirectional=True)
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(2*128,12),
-            nn.Sigmoid(),
-            )
-    
-    def forward(self, mel):
-        
-        x = self.feature_extractor(mel)
-        x = x.reshape(x.shape[0], x.shape[3], x.shape[1]*x.shape[2])
-        x, _ = self.bilstm(x)
-        x = x[:,-1] # last hidden state
-        x = self.classifier(x)
-        
-        
-        return x
-
-    def general_step(self, batch, batch_idx, mode):
-        
-        mel = batch['mel']
-        key_signature_id = batch['key_signature_id']
-        key_labels = batch['key_labels'].double()
-        if self.opt.local:
-            seq_length = batch['seq_length']
-        # forward pass
-        out = self.forward(mel)
-        
-        # loss
-        loss_func = nn.BCELoss()
-        bce_loss = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                
-                bce_loss = bce_loss + loss_func(out[i,:,:(seq_length[i]-self.window_size+1)], key_labels[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            bce_loss = loss_func(out, key_labels) # for global key estimation
-            
-        cosine_sim_func = nn.CosineSimilarity(dim=1)
-        cosine_sim = cosine_sim_func(out, key_labels)
-        loss = bce_loss# + (1 - torch.sum(cosine_sim)/out.shape[0])
-        accuracy = 0
-        
-        if self.opt.local: # for local key estimation
-            for i in range(mel.shape[0]):
-                accuracy = accuracy + self.all_key_accuracy_local(key_labels[i,:,:(seq_length[i]-self.window_size+1)], out[i,:,:(seq_length[i]-self.window_size+1)])
-        else:
-            accuracy = self.all_key_accuracy(key_labels, out)# for global key estimation
-        
-            
-        return loss, accuracy
-
-    def general_end(self, outputs, mode):
-        # average over all batches aggregated during one epoch
-        avg_loss = torch.stack([x[mode + '_loss'] for x in outputs]).mean()
-        acc = torch.stack(
-            [x[mode + '_accuracy'] for x in outputs]).mean()
-        return avg_loss, acc
-
-    def training_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "train")
-        tensorboard_logs = {'loss': loss}
-        should_log = False
-        if batch_idx % self.trainer.accumulate_grad_batches == 0:
-            should_log = (
-                    (self.global_step + 1) % self.opt.acc_grad == 0
-                    )
-        if should_log:
-            self.logger.experiment.add_scalar("train_loss", loss, self.global_step)
-
-        return {'loss': loss, 'train_accuracy': accuracy, 'log': tensorboard_logs}
-
-    def validation_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "val")
-        return {'val_loss': loss, 'val_accuracy': accuracy}
-
-    def test_step(self, batch, batch_idx):
-        loss, accuracy = self.general_step(batch, batch_idx, "test")
-        return {'test_loss': loss, 'test_accuracy': accuracy}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss, acc = self.general_end(outputs, "val")
-        print("Val-Loss={}".format(avg_loss))
-        print("Val-Acc={}".format(acc))
-        self.log("val_loss", avg_loss)
-        self.log("val_accuracy", acc)
-        self.logger.experiment.add_scalar("val_loss", avg_loss, self.global_step)
-        self.logger.experiment.add_scalar("val_accuracy", acc, self.global_step)
-        tensorboard_logs = {'val_loss': avg_loss, 'val_acc': acc}
-        return {'val_loss': avg_loss, 'val_acc': acc, 'log': tensorboard_logs}
-    
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['train'], shuffle=True, batch_size=self.batch_size, pin_memory=True, num_workers=12)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['val'], shuffle=False, batch_size=self.batch_size, drop_last=True, pin_memory=True, num_workers=12)
-
-    def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.data['test'], shuffle = False, batch_size=self.batch_size)
-    
-    def configure_optimizers(self):
-
-        params = list(self.feature_extractor.parameters()) + list(self.bilstm.parameters()) + list(self.classifier.parameters())
-            
-        optim = torch.optim.Adam(params=params,betas=(0.9, 0.999),lr=self.opt.lr, weight_decay=self.opt.reg)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=self.opt.gamma)
-
-        return [optim], [scheduler]
-    
-    def all_key_accuracy(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        for i in range(len(y_true)):
-            y_pred_keys = y_pred[i]
-            y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-            label_key = y_true[i]
-            correct_keys = torch.sum(y_pred_keys == label_key)
-            score = score + correct_keys
-            accuracy = accuracy + (1 if correct_keys == 12 else 0)
-            samples = samples + 1
-        return torch.tensor((accuracy / samples))
-    
-    def all_key_accuracy_local(self, y_true, y_pred):
-        score, accuracy, samples = 0, 0, 0
-        #for i in range(len(y_true)):
-        y_pred_keys = y_pred
-        y_pred_keys = y_pred_keys >= torch.sort(y_pred_keys).values[-7]
-        label_key = y_true
-        correct_keys = torch.sum(y_pred_keys == label_key)
-        score = score + correct_keys
-        accuracy = accuracy + (1 if correct_keys == 12 else 0)
-        samples = samples + 1
-        return torch.tensor((accuracy / samples))

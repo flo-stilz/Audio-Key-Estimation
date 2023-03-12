@@ -1,2 +1,11 @@
-/mnt/raid/fstilz/Key_estimation/Data/FSL10K/ac_analysis/492982_5187472_analysis.json
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/492982_5187472.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/395035_7473420.aiff.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/337826_2540244.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/337823_2540244.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/231769_1904290.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/43193_4948.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/14480_40665.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/43185_4948.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/14478_40665.wav.wav
+/mnt/raid/fstilz/Key_estimation/Data/FSL10K/audio/wav/14483_40665.wav.wav
 /mnt/raid/fstilz/Key_estimation/Data/KeyFinder/Luxury_Pool.mp3
