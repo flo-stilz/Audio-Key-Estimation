@@ -1,2 +1,2 @@
 # Audio-Key-Estimation
-Global and Local Key estimation for audio files
+Global Key signature estimation for audio files
