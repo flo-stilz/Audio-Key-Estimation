@@ -29,7 +29,7 @@ def eval(opt):
     king_carole        = DatasetKingCaroleLoader(os.path.join(file_path, "Data/King_Carole_Isophonics"))
     queen              = DatasetQueenLoader(os.path.join(file_path, "Data/Queen_Isophonics"))
     zweieck            = DatasetZweieckLoader(os.path.join(file_path, "Data/Zweieck_Isophonics"))
-    popular_songs      = DatasetPopularSongsLoader(os.path.join(file_path, "Data/UltimateSongs"))
+    ultimate_songs      = DatasetUltimateSongsLoader(os.path.join(file_path, "Data/UltimateSongs"))
     mcbillboard       = DatasetMcGillBillboardLoader(os.path.join(file_path, "Data/McGill-Billboard"))
 
     # ==================================================================================================================
@@ -38,36 +38,21 @@ def eval(opt):
     train_data = KeyDataset(genre=opt.genre, opt=opt)
     val_data = KeyDataset(genre=opt.genre, opt=opt)
     
+    # only for debug -> use only a handful samples
     if opt.debug:
         debug_d = DatasetGiantStepsMTGKeyLoader(os.path.join(file_path, 'Data/giantsteps-mtg-key-dataset'), data_type="debug")
         train_data.import_data(
-            #winterreise)
             debug_d)
         val_data.import_data(
-            #winterreise)
             debug_d)
     else:
         train_data.import_data(
-            giantsteps_mtg_key,
-            #gtzan,
-            #key_finder,
-            #tonality,
-            #FSL10K,
-            #guitar_set,
-            #beatles,
-            #king_carole,
-            #queen,
-            #zweieck,
-            #popular_songs,
-            #gmk_train,
-            #winterreise
+            king_carole,
         )
     
         val_data.import_data(
             winterreise,
-            #gmk_val,
             giantsteps_key
-            #king_carole,
         )
     if not opt.no_test and not opt.debug:
         # Initialize test datasets seperate to extract results for each individually
@@ -86,7 +71,7 @@ def eval(opt):
     # =====  Model Evaluation
     # ==================================================================================================================
 
-    #Pack data in Dataloader:
+    # Pack data in Dataloader:
     train = DataLoader(train_data, batch_size=opt.batch_size, shuffle=True, pin_memory=True)
     val = DataLoader(val_data, batch_size=opt.batch_size, shuffle=False, drop_last=True, pin_memory=True)
     if not opt.no_test and not opt.debug:
@@ -98,9 +83,9 @@ def eval(opt):
     # Initialize model
     os.environ["CUDA_VISIBLE_DEVICES"]=str(opt.gpu)
     
-    if not opt.no_semitones:
+    if not opt.only_semitones:
         shape = opt.octaves*36
-    elif opt.no_semitones:
+    elif opt.only_semitones:
         shape = opt.octaves*12
     else:
         shape = 360
@@ -129,7 +114,6 @@ def eval(opt):
     ckpt = torch.load(model_path)
     model.load_state_dict(ckpt, strict=True)
     model.eval()
-    #result_train = trainer.validate(ckpt_path=final_model_path, dataloaders=train)
     print("Result of Validation set")
     trainer.validate(model, dataloaders=val)
     if not opt.no_test and not opt.debug:
@@ -160,7 +144,7 @@ def init_parser():
 
     parser.add_argument('--batch_size', type=int, required=False, default=1,
                         help='Batch size!')
-    parser.add_argument('--lr', type=float, required=False, default=1e-3,
+    parser.add_argument('--lr', type=float, required=False, default=3e-4,
                         help='Learning Rate!')
     parser.add_argument('--drop', type=float, required=False, default=0.1,
                         help='Dropout of model')
@@ -168,7 +152,7 @@ def init_parser():
                         help='Weight decay')
     parser.add_argument('--gamma', type=float, required=False, default=0.96,
                         help='Gamma value for Exponential LR-Decay')
-    parser.add_argument('--acc_grad', type=int, required=False, default=1,
+    parser.add_argument('--acc_grad', type=int, required=False, default=8,
                         help='Set to 1 if no gradient accumulation is desired else enter desired value for accumulated batches before gradient step')
     parser.add_argument('--epochs', type=int, required=False, default=100,
                         help='Set maxs number of epochs.')
@@ -192,7 +176,7 @@ def init_parser():
                         help='Loss weight for key loss')
     parser.add_argument('--tonic_weight', type=float, required=False, default=1.0,
                         help='Loss weight for tonic loss')
-    parser.add_argument('--genre_weight', type=float, required=False, default=1.0,
+    parser.add_argument('--genre_weight', type=float, required=False, default=0.1,
                         help='Loss weight for genre loss')
     parser.add_argument('--resblock', action="store_true",
                         help='Use Resblocks instead of basic Convs')
@@ -206,14 +190,14 @@ def init_parser():
                         help='Immediately downsize to semitone representation in CQT!')
     parser.add_argument('--p2pc_conv', action="store_true",
                         help='Use Conv to downsample from pitch level to pitch class level! If false then use max pool')
-    parser.add_argument('--head_layers', type=int, required=False, default=1,
+    parser.add_argument('--head_layers', type=int, required=False, default=2,
                         help='Number of Conv Layers in classification heads at the end of PitchClassNet')
     parser.add_argument('--loc_window_size', type=int, required=False, default=10,
                         help='Amount of sec. shall be considered by local Key estimation per prediction')
     parser.add_argument('--time_pool_size', type=int, required=False, default=2,
                         help='Pooling size along time dimension for each layer')
-    parser.add_argument('--no_semitones', action="store_true",
-                        help='Preprocess CQTs in semitones meaning 36(12*3) bins per octave else 12 bins per octave')
+    parser.add_argument('--only_semitones', action="store_true",
+                        help='Preprocess CQTs in semitones meaning 12 bins per octave else 36(12*3) bins per octave')
     parser.add_argument('--multi_scale', action="store_true",
                         help='Preprocess CQTs in semitones and only tones and run two models and merge predictions')
     parser.add_argument('--no_test', action="store_true",

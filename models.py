@@ -277,32 +277,39 @@ class PitchClassNetLayer(nn.Module):
             self.out_channels_pc = self.all_previous_channels_pc + self.num_filters*self.conv_layers + self.all_previous_channels_p
             self.out_channels_dense = self.num_filters # growth rate for denseblocks
         else:
+            # previous filters in layer 1
             if self.layer_num==0:
                 self.all_previous_channels_p = 0
                 self.all_previous_channels_pc = 0
+            # previous filters in layer 2
             elif self.layer_num==1:
                 self.all_previous_channels_p = 1
                 self.all_previous_channels_pc = self.num_filters
+            # previous filters in layer 3
             elif self.layer_num==2:
                 self.all_previous_channels_p = self.num_filters*2
                 self.all_previous_channels_pc = 2*self.all_previous_channels_p
+            # previous filters in layer 4 and higher
             else:
                 self.all_previous_channels_p = (self.num_filters*2)*(4**(self.layer_num-2))
                 self.all_previous_channels_pc = 2*self.all_previous_channels_p
-
+            
+            # filters in layer 1
             if self.layer_num==0:
                 self.out_channels_p = 1
                 self.out_channels_pc = 4
+            # filters in layer 2
             elif self.layer_num==1:
                 self.out_channels_p = 2*self.num_filters
                 self.out_channels_pc = 2*self.out_channels_p
+            # filters in layer 3 and higher
             else:
                 self.out_channels_p = 4*self.all_previous_channels_p
                 self.out_channels_pc = 4*self.all_previous_channels_pc
 
         # Layer Content Definition:
         if self.layer_num==0:
-            if not self.opt.no_semitones:
+            if not self.opt.only_semitones:
                 self.pool_semi = nn.Conv2d(1, 1, 3, stride=(3,1), padding=(0,1),padding_mode="circular")
                 self.pool_semi_b = nn.BatchNorm2d(1)
                 self.pool_semi_a = nn.LeakyReLU()
@@ -312,21 +319,21 @@ class PitchClassNetLayer(nn.Module):
                 self.pool = Pitch2PitchClassPool(self.pitch_classes, self.pitches//3, 1, float('-inf'))
             self.pc2pc = PitchClass2PitchClass(in_channels = 1, out_channels = self.num_filters, kernel_size = self.kernel_size, conv_layers = self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
         else:
-            if self.stay_sixth or (self.opt.no_semitones):
+            if self.stay_sixth or (self.opt.only_semitones):
                 self.up = PitchClass2Pitch(self.pitches//3)
             else:
                 self.up_sixth = nn.ConvTranspose2d(in_channels=self.all_previous_channels_pc, out_channels=self.all_previous_channels_pc, kernel_size=(3,1), stride=(3,1))
                 self.up_sixth_b = nn.BatchNorm2d(self.all_previous_channels_pc)
                 self.up_sixth_a = nn.LeakyReLU()
                 if self.opt.pc2p_mem:
-                    self.up = PitchClass2Pitch_MemoryVariant(self.pitches, self.pitch_classes if self.opt.no_semitones else self.pitch_classes*3)
+                    self.up = PitchClass2Pitch_MemoryVariant(self.pitches, self.pitch_classes if self.opt.only_semitones else self.pitch_classes*3)
                 else:
                     self.up = PitchClass2Pitch(self.pitches)
             if self.denseblock:
                 self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_dense, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock, multi_path=self.dense_multi_path)
             else:
                 self.p2p = Pitch2Pitch(in_channels=self.all_previous_channels_p if self.opt.pc2p_mem else self.all_previous_channels_pc+self.all_previous_channels_p, out_channels=self.out_channels_p, kernel_size=self.kernel_size, conv_layers=self.conv_layers, resblock=self.resblock, denseblock=self.denseblock)
-            if not self.stay_sixth and (not self.opt.no_semitones):
+            if not self.stay_sixth and (not self.opt.only_semitones):
                 self.pool_semi = nn.Conv2d(in_channels=self.out_channels_p, out_channels=self.out_channels_p, kernel_size=(3,3), stride=(3,1), padding=(0,1), padding_mode="circular")
                 self.pool_semi_b = nn.BatchNorm2d(self.out_channels_p)
                 self.pool_semi_a = nn.LeakyReLU()
@@ -350,7 +357,7 @@ class PitchClassNetLayer(nn.Module):
         assert len(p.shape) == 4
         
         if self.layer_num==0:
-            if not self.opt.no_semitones:
+            if not self.opt.only_semitones:
                 p_semi = self.pool_semi(p) # Pool from a third of a semitone to semitone
                 p_semi = self.pool_semi_b(p_semi)
                 p_semi = self.pool_semi_a(p_semi)
@@ -361,7 +368,7 @@ class PitchClassNetLayer(nn.Module):
             pc = self.pool(p_semi) # Pitch2PitchClass
             pc = self.pc2pc(pc) # Equivariant Layer
         else:
-            if (not self.stay_sixth) and (not self.opt.no_semitones):
+            if (not self.stay_sixth) and (not self.opt.only_semitones):
                 p_sixth = self.up_sixth(pc)
                 p_sixth = self.up_sixth_b(p_sixth)
                 p_sixth = self.up_sixth_a(p_sixth)
@@ -375,7 +382,7 @@ class PitchClassNetLayer(nn.Module):
             if not self.opt.pc2p_mem:
                 p = torch.cat([p,p2],dim=1) # PitchConcat
             p = self.p2p(p) # Pitch2PitchConv
-            if (not self.stay_sixth) and (not self.opt.no_semitones):
+            if (not self.stay_sixth) and (not self.opt.only_semitones):
                 pc2 = self.pool_semi(p) # Pool from Third of a semitone to semitone
                 pc2 = self.pool_semi_b(pc2)
                 pc2 = self.pool_semi_a(pc2)

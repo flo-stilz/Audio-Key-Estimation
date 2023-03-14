@@ -94,11 +94,9 @@ class KeyDataset():
         # shuffling the dataset is done by shuffling the filenames (with their dataset name) and then importing them.
         # Reason is that shuffling the list of spectrograms is more computation/memory heavy.
         random.shuffle(self.filenames)
-        #self.store_data_content()
         
         self.store_content()
         self.find_longest_seq()
-        #results = map(self.load_data_from_filename, map(lambda x: x[0], self.filenames), map(lambda x: x[1], self.filenames), map(lambda x: x[2], self.filenames))
         print("Length of Data: "+str(len(self.mel)))
         
     def load_content(self, idx):
@@ -110,13 +108,11 @@ class KeyDataset():
 
         mel, key_labels, key_signature_id, genre = self.load_data_from_filename(filename, dataset_name, pitch_shift)
 
-        print(key_labels)
-        print(key_signature_id)
-        print(self.filenames[int(idx)])        
-
         return mel, key_labels, key_signature_id, genre, int(idx)
       
     def find_longest_seq(self):
+        # finds longest sequence within dataset
+        # required for padding input before feeding into model
         for i in range(len(self.mel)):
             if self.mel[str(i)].shape[2]>self.seq_length_max:
                 self.seq_length_max = self.mel[str(i)].shape[2]
@@ -124,6 +120,7 @@ class KeyDataset():
         
     def store_content(self):
         
+        # store labels and cqts in memory
         index_list = torch.zeros(len(self.filenames))
         for i in range(len(index_list)):
             index_list[i] = i
@@ -137,15 +134,7 @@ class KeyDataset():
                 self.key_signature_id[str(idx)] = key_signature_id
                 self.genre_labels[str(idx)] = genre
                 self.tonic_labels[str(idx)] = tonic_labels
-        '''
-        for i in range(len(self.filenames)):
-            mel, mel2, key_labels, key_signature_id, genre, tonic_labels, idx = self.save_files(i)
-            self.mel[str(idx)] = mel
-            self.key_labels[str(idx)] = key_labels
-            self.tonic_labels[str(idx)] = tonic_labels
-            self.key_signature_id[str(idx)] = key_signature_id
-            self.genre_labels[str(idx)] = genre        
-        '''
+        
         print('done', flush=True)
         
     def load_labels_from_filename(self, filename, dataset_name, mel):
@@ -162,36 +151,34 @@ class KeyDataset():
         filename_str = bytes.decode(filename.numpy())
         
         melspectrogram = {}
-        if self.opt.octaves==5 and self.opt.frames==5 and (not self.opt.no_semitones):
+        if self.opt.octaves==5 and self.opt.frames==5 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"5oct_5frames.pt"
-        elif self.opt.octaves==5 and self.opt.frames==10 and (not self.opt.no_semitones):
+        elif self.opt.octaves==5 and self.opt.frames==10 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"5oct_10frames.pt"
-        elif self.opt.octaves==5 and self.opt.frames==20 and (not self.opt.no_semitones):
+        elif self.opt.octaves==5 and self.opt.frames==20 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"5oct_20frames.pt"
-        elif self.opt.octaves==5 and (not self.opt.no_semitones):
+        elif self.opt.octaves==5 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"fmin64.pt"
-        elif self.opt.octaves==7 and (not self.opt.no_semitones):
+        elif self.opt.octaves==7 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"7oct.pt"
-        elif self.opt.octaves==8 and (not self.opt.no_semitones):
+        elif self.opt.octaves==8 and (not self.opt.only_semitones):
             name = filename_str.replace(".wav","").replace(".mp3","")+"8oct.pt"
-        if (self.opt.no_semitones) and self.opt.octaves==8:
+        if (self.opt.only_semitones) and self.opt.octaves==8:
             name = filename_str.replace(".wav","").replace(".mp3","")+"8oct_no_semi.pt"
         
-        if self.opt.octaves==5 and (not self.opt.no_semitones):
+        if self.opt.octaves==5 and (not self.opt.only_semitones):
             shape = 180
-        elif self.opt.octaves==7 and (not self.opt.no_semitones):
+        elif self.opt.octaves==7 and (not self.opt.only_semitones):
             shape = 252
-        elif self.opt.octaves==8 and (not self.opt.no_semitones):
+        elif self.opt.octaves==8 and (not self.opt.only_semitones):
             shape = 288
-        elif self.opt.octaves==8 and self.opt.no_semitones:
+        elif self.opt.octaves==8 and self.opt.only_semitones:
             shape = 96
         else:
             shape = 360
 
         if os.path.exists(name):
-            #print("saved!")
             melspectrogram = torch.load(name)
-            #print(melspectrogram.shape)
             if melspectrogram.shape[1]==shape:# and melspectrogram.shape[2]==592:
                 mel = melspectrogram
                 key_labels, key_signature_id, genre, mel, tonic_labels = self.load_labels_from_filename(filename, dataset_name, mel=mel)
@@ -201,27 +188,23 @@ class KeyDataset():
                 
         else:
             mel, key_labels, key_signature_id, genre, tonic_labels = self.load_data_from_filename(filename, dataset_name, pitch_shift)
-            #mel, key_labels, key_signature_id, genre, tonic_labels = None, None, None, None, None
-            
+           
             torch.save(mel, name)
             
         if self.opt.multi_scale and self.opt.octaves==8:
             name2 = filename_str.replace(".wav","").replace(".mp3","")+"8oct_no_semi.pt"
             
             if os.path.exists(name2):
-                #print("saved!")
                 melspectrogram2 = torch.load(name2)
-                #print(melspectrogram.shape)
                 if melspectrogram2.shape[1]==96:# and melspectrogram.shape[2]==592:
                     mel2 = melspectrogram2
-                    #key_labels, key_signature_id, genre, mel, tonic_labels = self.load_labels_from_filename(filename, dataset_name, mel=mel)
+                    
                 else:
                     mel2, _, _, _, _ = self.load_data_from_filename(filename, dataset_name, pitch_shift, self.opt.multi_scale)
                     torch.save(mel2, name2)
                     
             else:
                 mel2, _, _, _, _ = self.load_data_from_filename(filename, dataset_name, pitch_shift, self.opt.multi_scale)
-                #mel, key_labels, key_signature_id, genre, tonic_labels = None, None, None, None, None
                 
                 torch.save(mel2, name2)
         else:
@@ -232,73 +215,13 @@ class KeyDataset():
                 diff = 592-mel.shape[2]
                 mel = torch.cat((mel,torch.zeros([1,shape,diff])),dim=2)
                 
-        '''
-        if os.path.exists(name):
-            os.remove(name)
-        '''
-        
         return mel, mel2, key_labels, key_signature_id, genre, tonic_labels, int(idx)
     
-    
-    def load_data_content(self, idx):
-        ''' 
-        if int(idx)%100==0:
-            print('loaded '+str(int(idx))+' files', flush=True)
-        '''
-        filename, dataset_name, pitch_shift = self.filenames[int(idx)]
-        filename_str = bytes.decode(filename.numpy())
-        
-        melspectrogram = {}
-        name = filename_str.replace(".wav","").replace(".mp3","")+".pt"
-        
-        if os.path.exists(name):
-            #print("saved!")
-            melspectrogram = torch.load(name)
-            if melspectrogram.shape[1]==360:
-                mel = melspectrogram
-                key_labels, key_signature_id, genre, mel = self.load_labels_from_filename(filename, dataset_name, mel=mel)
-            else:
-                mel, key_labels, key_signature_id, genre = self.load_data_from_filename(filename, dataset_name, pitch_shift)
-                torch.save(mel, name)
-        else:
-            mel, key_labels, key_signature_id, genre = self.load_data_from_filename(filename, dataset_name, pitch_shift)
-            
-            torch.save(mel, name)
-
-        return mel, key_labels, key_signature_id, genre, int(idx)
-    
-    
-    def store_data_content(self):
-        
-        index_list = torch.zeros(len(self.filenames))
-        for i in range(len(index_list)):
-            index_list[i] = i
-        with ThreadPoolExecutor() as executor:
-            results = executor.map(self.load_data_content, index_list)
-            for result in results:
-        
-                mel, key_labels, key_signature_id, genre, idx = result
-                
-                self.mel[str(idx)] = mel
-                self.key_labels[str(idx)] = key_labels
-                self.key_signature_id[str(idx)] = key_signature_id
-                self.genre_labels[str(idx)] = genre
-        '''
-        for i in range(len(self.filenames)):
-            mel, key_labels, key_signature_id, genre, idx = self.load_data_content(i)
-            self.mel[str(idx)] = mel
-            self.key_labels[str(idx)] = key_labels
-            self.key_signature_id[str(idx)] = key_signature_id
-            self.genre_labels[str(idx)] = genre
-        '''
-            
             
     def __getitem__(self, idx):
         
         mel, mel2, key_labels, key_signature_id, genre, tonic_labels = self.mel[str(idx)], self.mel2[str(idx)], self.key_labels[str(idx)], self.key_signature_id[str(idx)], self.genre_labels[str(idx)], self.tonic_labels[str(idx)]
 
-        #mel, key_labels, key_signature_id, genre, tonic_labels, i = self.save_files(idx)
-        
         if self.opt.local:
             seq_length = mel.shape[2]
             padded_seq_length = self.seq_length_max
@@ -309,7 +232,6 @@ class KeyDataset():
             if self.opt.local:
                 padded_genre = torch.cat((genre, torch.zeros([padded_seq_length-genre.shape[0], genre.shape[1]])),dim=0)
             item = {'mel': padded_mel}
-            #item = {'mel2': }
             item['key_labels'] = padded_key_labels
             item['tonic_labels'] = padded_tonic_labels
             item['key_signature_id'] = padded_key_signature_id
@@ -415,16 +337,8 @@ class DatasetLoader:
         Tensor
         """
         file_path = bytes.decode(file_path.numpy()) # convert tf to string
-        #try:
+
         waveform, sample_rate = torchaudio.load(file_path)
-        '''
-        except RuntimeError:
-            with open('short_songs.txt', 'a') as f:
-                f.write("\n"+file_path)
-            waveform = np.zeros([1,500000])
-            sample_rate = 22050
-        #waveform, sample_rate = torchaudio.load(file_path)
-        '''
         
         return waveform, sample_rate
     
@@ -439,8 +353,6 @@ class DatasetLoader:
             genre = self.get_genre(file_path)
         else:
             genre = tf.zeros([8])
-        
-        #print(len(key_signature[0]))
 
         if self.name=="Schubert Winterreise" and opt.local:
             for i in range(len(key_signature[0])):
@@ -533,8 +445,6 @@ class DatasetLoader:
     
             key_signature_id = tf.argmax(key_signature == self.signature)
             key_signature_id = tf.one_hot(key_signature_id, 24)
-            #print("Key_labels: "+str(key_labels))
-            #print("Key_Signature_ID: "+str(key_signature_id))
             
             tonic_label = tf.math.argmax(key_signature == self.signature) % 12  # to get the tonic
             tonic_label = tf.one_hot(tf.cast(tonic_label, tf.int32), 12)   # one-hot encode the tonic
@@ -575,19 +485,14 @@ class DatasetLoader:
         hop_length = round(rate/(opt.frames if opt.frames>0 else 1)) # hop_length is including sample rate so that it yields exactly the desired amount of frames per second in the song
         window_size = math.ceil(rate/hop_length)
         
-        # C2 = 65Hz; C7 = 2093Hz; n_mels = 12(keys) * 5(octaves) * 2(bins per key) = 120
-        #melspectrogram = librosa.feature.melspectrogram(y=waveform.numpy(), sr=44100, n_mels=120, fmin=63.57, fmax=2155.23,
-        #                                                hop_length=w_length//592)
         start = time.time()
-        if (not opt.no_semitones):
+        if (not opt.only_semitones):
             melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=hop_length if opt.frames>0 else (w_length // opt.window_size + 1),# fmin=64,
                                          bins_per_octave=12 * 3, n_bins=12 * 3 * opt.octaves)
-        if (opt.no_semitones or multi_scale):
+        if (opt.only_semitones or multi_scale):
             melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=hop_length if opt.frames>0 else (w_length // opt.window_size + 1),# fmin=64,
                                          bins_per_octave=12 * 1, n_bins=12 * 1 * opt.octaves)
         print(time.time()-start, melspectrogram.shape)
-        # 44100Hz / 512(hop_size) => feature rate of ~86.1Hz
-        #print(melspectrogram.shape)
 
         mel = torch.tensor(melspectrogram)
         mel = torch.abs(mel)
@@ -625,13 +530,13 @@ class DatasetGiantStepsKeyLoader(DatasetLoader):
                        'deep-house', 'electro-house', 'trance', 'dubstep', 'tech-house', 'hard-dance', 'electronica', 'psy-trance',
                        'dj-tools', 'funk r&b', 'glitch-hop', 'hardcore hard-techno', 'indie-dance nu-disco', 'pop rock', 'reggae dub']
         self.a_genres = ['Classical', 'Rock', 'Pop', 'Folk', 'Metal', 'Electronic', 'Hip-Hop', 'R&B', 'Blues', 'Jazz', 'Country']
+        # assign original dataset labels to general genre classes
         self.genre_ids = [[],[],[21],[],[],[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20],[2], [16, 17, 22], [], [], []]
         
 
     def get_filenames(self):
         data_dir = pathlib.Path(self.dataset_loc)
         filenames = tf.io.gfile.glob(str(data_dir) + '/audio/*.wav')
-        #filenames = filenames[:8]
         filenames = tf.random.shuffle(filenames)
         self.size = len(filenames)
         return filenames
@@ -690,6 +595,7 @@ class DatasetGiantStepsMTGKeyLoader(DatasetGiantStepsKeyLoader):
                        'deep house', 'electro house', 'trance', 'dubstep', 'tech house', 'hard dance', 'electronica', 'psy-trance'
                        '', '', '', '', '', '', '']
         self.a_genres = ['Classical', 'Rock', 'Pop', 'Folk', 'Metal', 'Electronic', 'Hip-Hop', 'R&B', 'Blues', 'Jazz', 'Country']
+        # assign original dataset labels to general genre classes
         self.genre_ids = [[],[],[],[],[],[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],[2],[], [], [], []]
         self.type = data_type
         
@@ -697,7 +603,6 @@ class DatasetGiantStepsMTGKeyLoader(DatasetGiantStepsKeyLoader):
         data_dir = pathlib.Path(self.dataset_loc)
         
         filenames = tf.io.gfile.glob(str(data_dir) + '/audio/*.wav')
-        #filenames = filenames[:8]
         filenames = tf.random.shuffle(filenames)
 
         valids = tf.map_fn(fn=self.get_key_signature, elems=filenames)
@@ -714,65 +619,6 @@ class DatasetGiantStepsMTGKeyLoader(DatasetGiantStepsKeyLoader):
             
         self.size = len(filenames)
         return filenames
-
-
-# ======================================================================================================================
-class DatasetTheBeatlesLoader(DatasetLoader):
-    def __init__(self, dataset_loc):
-        super().__init__(dataset_loc)
-        self.name = 'The Beatles'
-        # This does not differentiate between modes and only gives the tonic
-
-    def get_filenames(self):
-        data_dir = pathlib.Path(self.dataset_loc)
-        filenames = tf.io.gfile.glob(str(data_dir) + '/*/*.mp3')
-        filenames = tf.random.shuffle(filenames)
-        self.size = len(filenames)
-        return filenames
-
-    def get_key_signature(self, file_path):
-        parts = tf.strings.split(
-            input=file_path,
-            sep=os.path.sep)
-        prior = tf.strings.reduce_join(parts[:-2], separator=os.path.sep)
-        middle = tf.strings.join(["The_Beatles_Annotations", "keylab", "The_Beatles", parts[-2]], os.path.sep)
-        name = tf.strings.regex_replace(parts[-1], "\\.mp3", ".lab")
-        keypath = tf.strings.join([prior, middle, name], os.path.sep)
-        key_content_lines = tf.strings.split(tf.io.read_file(keypath), '\n')
-        key_content_lines = tf.boolean_mask(key_content_lines,
-                                            tf.strings.regex_full_match(key_content_lines, ".*\tKey\t.*"))
-        key_content_lines = tf.strings.split(key_content_lines, '\t')
-
-        return key_content_lines  # tf.strings.split(keyfile, '\t')[0]
-
-    def get_waveform_and_key_signature(self, file_path, pitch_shift=0):
-        audio_binary = tf.io.read_file(file_path)
-        print(audio_binary.shape)
-        waveform = self.decode_audio(audio_binary, FileExtension.MP3)
-
-        key_signature_parts = self.get_key_signature(file_path)
-        key_part = np.random.randint(int(key_signature_parts.shape[0] or 1))
-        audio_from = int(float(key_signature_parts[key_part][0])) * 44100
-        audio_to = int(float(key_signature_parts[key_part][1])) * 44100
-        key_signature = key_signature_parts[key_part][3]
-
-        audio_length = 800000
-        duration = audio_to - audio_from - audio_length if audio_to - audio_from - audio_length > 0 else 1
-        audio_start = audio_from + tf.random.uniform(shape=[], maxval=duration, dtype=tf.int32)
-        audio_end = audio_start + audio_length if audio_start + audio_length < audio_to else audio_to
-
-        waveform = waveform[audio_start:audio_end]
-        zero_padding = tf.zeros(
-            [audio_length] - tf.shape(waveform),
-            dtype=tf.float32)
-        # Cast the waveform tensors' dtype to float32
-        waveform = tf.cast(waveform, dtype=tf.float32)
-        # Concatenate the waveform with 'zero_padding', which ensures all audio
-        # clips are of the same length.
-        equal_length = tf.concat([waveform, zero_padding], 0)
-
-        return equal_length, tf.strings.split(key_signature, ':')[0]
-
 
 # ======================================================================================================================
 class DatasetSchubertWinterreiseLoader(DatasetLoader):
@@ -830,8 +676,6 @@ class DatasetSchubertWinterreiseLoader(DatasetLoader):
                 lines = tf.strings.regex_replace(lines, "\r", "")
                 time_interval = tf.strings.reduce_join(lines[:, :2], axis=-1, separator='_')
                 keys = tf.squeeze(lines[:, -1:], axis=1)
-                #print(time_interval)
-                #print(keys)
                 local_keys = (time_interval, keys)
                 local_keys_list.append(local_keys)
                 
@@ -936,7 +780,6 @@ class DatasetLoaderYouTubeScraped(DatasetLoader):
     def __init__(self, dataset_loc):
         super().__init__(dataset_loc)
 
-        # TODO: maybe use 'os.path.sep' instead of '/', and maybe 'dataset_loc' already ends with os.path.sep?
         with open(dataset_loc + '/__youtube_similarities.csv', newline='', encoding='utf-8') as f:
             reader = csv.reader(f)
             data = list(reader)
@@ -949,7 +792,7 @@ class DatasetLoaderYouTubeScraped(DatasetLoader):
 
     def get_filenames(self):
         data_dir = pathlib.Path(self.dataset_loc)
-        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')  # TODO: maybe use 'os.path.sep' instead of '/'
+        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')
         filenames = tf.random.shuffle(filenames)
         
         filenames2 = []
@@ -1011,7 +854,7 @@ class DatasetKeyFinderLoader(DatasetLoaderYouTubeScraped):
     
     def get_filenames(self):
         data_dir = pathlib.Path(self.dataset_loc)
-        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')  # TODO: maybe use 'os.path.sep' instead of '/'
+        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')
         filenames = tf.random.shuffle(filenames)
         
         filenames2 = []
@@ -1050,16 +893,9 @@ class DatasetMcGillBillboardLoader(DatasetLoaderYouTubeScraped):
     
     def get_filenames(self):
         data_dir = pathlib.Path(self.dataset_loc)
-        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')  # TODO: maybe use 'os.path.sep' instead of '/'
+        filenames = tf.io.gfile.glob(str(data_dir) + '/*.mp3')
         filenames = tf.random.shuffle(filenames)
-        '''
-        filenames2 = []
-        for file in filenames:
-            if os.path.getsize(bytes.decode(file.numpy()))<10000000: # limit to 10MB files
-                filenames2.append(file)
-        filenames = tf.convert_to_tensor(filenames2)
-        print("Files with optimal mem: "+str(len(filenames)))
-        '''
+        
         song_names = tf.strings.split(
             input=filenames,
             sep=os.path.sep)[:, -1:]
@@ -1276,11 +1112,11 @@ class DatasetZweieckLoader(DatasetLoaderYouTubeScraped):
         genre = tf.one_hot(1, len(self.a_genres))
         return genre
 # ======================================================================================================================
-class DatasetPopularSongsLoader(DatasetLoader):
+class DatasetUltimateSongsLoader(DatasetLoader):
     def __init__(self, dataset_loc):
         super().__init__(dataset_loc)
         data_dir = pathlib.Path(self.dataset_loc)
-        self.name = 'Popular Songs Dataset'
+        self.name = 'Ultimate Songs Dataset'
         self.keys = ['Cb', 'Gb', 'Db', 'Ab', 'Eb', 'Bb', 'F', 'C', 'G', 'D', 'A', 'E', 'B', 'F#', 'C#',
                      '', '', '', 'D#', 'G#', 'A#',
                      'Abm', 'Ebm', 'Bbm', 'Fm', 'Cm', 'Gm', 'Dm', 'Am', 'Em', 'Bm', 'F#m', 'C#m', 'G#m', 'D#m', 'A#m',
@@ -1292,10 +1128,9 @@ class DatasetPopularSongsLoader(DatasetLoader):
         
         self.a_genres = ['Classical', 'Rock', 'Pop', 'Folk', 'Metal', 'Electronic', 'Hip-Hop', 'RandB', 'Blues', 'Jazz', 'Country']
 
-        # TODO: maybe use 'os.path.sep' instead of '/', and maybe 'dataset_loc' already ends with os.path.sep?
         folders = ["SubA", "SubA#m", "SubAb", "SubAbm", "SubAm", "SubB", "SubBb", "SubBbm", "SubBm", "SubC", "SubC#", "SubC#m", "SubCb", "SubCm", "SubD", "SubD#m", "SubDb", "SubDm", "SubE", "SubEb", "SubEbm", "SubEm", "SubF", "SubF#", "SubF#m", "SubFm", "SubG", "SubG#m", "SubGb", "SubGm"]
         genre = ["Rock", "Pop", "Classical", "Metal", "Folk", "RandB", "Hip-Hop"]
-        #genre = ["Rock"]
+
         data = []
         for j in genre:
             if j == "Rock" or j== "Pop":
@@ -1315,6 +1150,7 @@ class DatasetPopularSongsLoader(DatasetLoader):
                             reader = csv.reader(f)
                             data = data + list(reader)
         self.data = tf.convert_to_tensor(data)
+        # Define threshold for minimum similarity score
         self.threshold = 0.8 # might want to increase further to ensure correctness
         
     def decode_audio(self, audio_binary, file_extension: FileExtension):
@@ -1324,7 +1160,7 @@ class DatasetPopularSongsLoader(DatasetLoader):
         data_dir = pathlib.Path(self.dataset_loc)
         folders = ["SubA", "SubA#m", "SubAb", "SubAbm", "SubAm", "SubB", "SubBb", "SubBbm", "SubBm", "SubC", "SubC#", "SubC#m", "SubCb", "SubCm", "SubD", "SubD#m", "SubDb", "SubDm", "SubE", "SubEb", "SubEbm", "SubEm", "SubF", "SubF#", "SubF#m", "SubFm", "SubG", "SubG#m", "SubGb", "SubGm"]
         genre = ["Rock", "Pop", "Classical", "Metal", "Folk", "RandB", "Hip-Hop"]
-        #genre = ["Rock"]
+
         for j in genre:
             if j == "Rock" or j == "Pop":
                 for i in range(len(folders)):
@@ -1353,7 +1189,6 @@ class DatasetPopularSongsLoader(DatasetLoader):
                 filenames2.append(file)
         filenames = tf.convert_to_tensor(filenames2)
         print("Files with optimal mem: "+str(len(filenames)))
-        #filenames = tf.random.shuffle(filenames)
 
         song_names = tf.strings.split(
             input=filenames,
@@ -1389,7 +1224,7 @@ class DatasetPopularSongsLoader(DatasetLoader):
 
         
     def get_genre(self, file_path):
-        
+        # gets genre based on path name
         file_path = bytes.decode(file_path.numpy())
         for i in range(len(self.a_genres)):
             if self.a_genres[i] in file_path:

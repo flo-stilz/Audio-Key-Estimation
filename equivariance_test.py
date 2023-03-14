@@ -45,8 +45,8 @@ def init_parser():
                         help='Train on local key estimation')
     parser.add_argument('--gpu', type=int, required=True,
                         help='Set the name of the GPU in the system')
-    parser.add_argument('--octaves', type=int, required=False, default=8,
-                        help='How many octaves to consider for CQT')
+    parser.add_argument('--octaves', type=int, required=False, default=10,
+                        help='How many octaves to consider for CQT! NOTE: actual amount of octaves = octaves-2 due to padding so if 8 octaves are desired enter 10')
     parser.add_argument('--conv_layers', type=int, required=False, default=3,
                         help='How many convolutional layers per PitchClassNet layer')
     parser.add_argument('--n_filters', type=int, required=False, default=4,
@@ -61,13 +61,13 @@ def init_parser():
                         help='Use Resblocks instead of basic Convs')
     parser.add_argument('--denseblock', action="store_true",
                         help='Use Dense blocks instead of basic Convs')
-    parser.add_argument('--frames', type=int, required=False, default=0,
+    parser.add_argument('--frames', type=int, required=False, default=5,
                         help='Sets Hop_Length for CQTs to represent each sec. in song in the amount of frames')
     parser.add_argument('--stay_sixth', action="store_true",
                         help='Immediately downsize to semitone representation in CQT!')
     parser.add_argument('--p2pc_conv', action="store_true",
                         help='Use Conv to downsample from pitch level to pitch class level! If false then use max pool')
-    parser.add_argument('--head_layers', type=int, required=False, default=1,
+    parser.add_argument('--head_layers', type=int, required=False, default=2,
                         help='Number of Conv Layers in classification heads at the end of PitchClassNet')
     parser.add_argument('--cqt_with_border', action="store_true",
                         help='When creating custom cqt decides on whether border points contained!')
@@ -75,8 +75,8 @@ def init_parser():
                         help='Amount of sec. shall we considered by local Key estimation per prediction')
     parser.add_argument('--time_pool_size', type=int, required=False, default=2,
                         help='Pooling size along time dimension for each layer')
-    parser.add_argument('--no_semitones', action="store_true",
-                        help='Preprocess CQTs in semitones meaning 36(12*3) bins per octave else 12 bins per octave')
+    parser.add_argument('--only_semitones', action="store_true",
+                        help='Preprocess CQTs in semitones meaning 12 bins per octave else 36(12*3) bins per octave')
     parser.add_argument('--multi_scale', action="store_true",
                         help='Preprocess CQTs in semitones and only tones and run two models and merge predictions')
     parser.add_argument('--linear_reg_multi', action="store_true",
@@ -94,10 +94,11 @@ def init_parser():
 opt = init_parser()
 
 # load song or sound:
+# Different examples are commented out
 file_p = Path(os.path.dirname(os.path.abspath(os.getcwd())))
 #file = os.path.join(file_p, "Data/giantsteps-key-dataset/audio")
 file = os.path.join(file_p, "Data/GTZAN/genres_original/blues")
-#file = os.path.join(file_p, "Data/PopularSongs/Rock/SubA")
+#file = os.path.join(file_p, "Data/UltimateSongs/Rock/SubA")
 #file = os.path.join(file_p, "Data/Queen_Isophonics")
 #file_path = tf.io.read_file(file+"/10089.LOFI.mp3")
 
@@ -109,7 +110,6 @@ waveform, rate = torchaudio.load(file+"/blues.00000.wav")
 #waveform, rate = torchaudio.load(file+"/A_Firm_Kick.mp3")
 #waveform, rate = torchaudio.load(file+"/Queen_Kind_Of_Magic.mp3")
 print(waveform.shape[1]/rate)
-#waveform = waveform[:,:rate]
 print(waveform.shape)
 w_length = waveform.shape[1]
 print(rate)
@@ -118,9 +118,10 @@ waveform = waveform[0]
 print("Adjusted Wave: "+str(waveform.shape))
 
 def mel_shifting_up(mel, semitones):
+    # to adjust for that semitones are split into 3 bins
+    # if mel is on semitone level then remove 3
     steps = 3*semitones
     mel_shift = mel.clone()
-    print(torch.sum(mel[-1]))
     for i in range(mel.shape[0]-1,-1,-1):
         if i==steps-1:
             mel_shift[0:steps] = torch.zeros([steps, mel.shape[1]])
@@ -130,9 +131,10 @@ def mel_shifting_up(mel, semitones):
     return mel_shift
 
 def mel_shifting_down(mel, semitones):
+    # to adjust for that semitones are split into 3 bins
+    # if mel is on semitone level then remove 3
     steps = 3*semitones
     mel_shift = mel.clone()
-    print(torch.sum(mel[0]))
     for i in range(mel.shape[0]-1):
         if i==mel.shape[0]-steps:
             mel_shift[mel.shape[0]-steps:] = torch.zeros([steps, mel.shape[1]])
@@ -144,8 +146,6 @@ def mel_shifting_down(mel, semitones):
 
 shift = 1
 
-#waveform_shift = test_pitch_shift_up(waveform, rate, shift)
-
 # Display the different waveforms:
 librosa.display.waveshow(waveform.numpy(),sr=rate)
 
@@ -154,44 +154,26 @@ if not opt.custom_cqt:
     song_length = math.ceil(w_length/rate) # song length in seconds
     hop_length = round(rate/(opt.frames if opt.frames>0 else 1)) # hop_length is including sample rate so that it yields exactly the desired amount of frames per second in the song
     window_size = math.ceil(rate/hop_length)
-    start_time = time.time()
-    print("start")
-    if not opt.no_semitones:
-        melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=(w_length // 592 if opt.frames==0 else hop_length),# fmin=10,
+    
+    if not opt.only_semitones:
+        melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=(w_length // 592 if opt.frames==0 else hop_length),
                                      bins_per_octave=12 * 3, n_bins=12 * 3 * (opt.octaves-2))
     else:
-        melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=(w_length // 592 if opt.frames==0 else hop_length),# fmin=10,
+        melspectrogram = librosa.cqt(y=waveform.numpy(), sr=rate, hop_length=(w_length // 592 if opt.frames==0 else hop_length),
                                      bins_per_octave=12 * 1, n_bins=12 * 1 * (opt.octaves-2))
-    # 44100Hz / 512(hop_size) => feature rate of ~86.1Hz
-    print("Mel_Shape: "+str(melspectrogram.shape))
-    end_time = time.time()-start_time
-    print("end")
-    #melspectrogram = librosa.feature.melspectrogram(y=waveform.numpy(), sr=rate, hop_length=100000)
-    #print(melspectrogram.shape)
-    '''
-    if melspectrogram.shape[0]==2:
-        melspectrogram = melspectrogram[0]
-    else:
-        melspectrogram = melspectrogram.reshape(melspectrogram.shape[1], melspectrogram.shape[2])
-    '''
     
     mel = torch.tensor(melspectrogram)
     mel = torch.abs(mel)
     mel = torch.log(1 + mel)  # log of the intensity
-    print(mel.shape)
     mel_shift = mel_shifting_up(mel, shift)
 
 def shift_and_stack(mel):
-    #out = mel
     # pad input!
     mel = torch.cat((mel,torch.zeros(12*3, mel.shape[1])))
     mel = torch.cat((torch.zeros(12*3, mel.shape[1]), mel))
 
     shape = opt.octaves*12*3
     model = PitchClassNet(shape, 12, num_layers=opt.num_layers, kernel_size=opt.kernel_size, opt=opt, window_size=opt.window_size).double().cuda()
-    #model = TestNet(shape, 12, num_layers=opt.num_layers, kernel_size=opt.kernel_size, opt=opt, window_size=opt.window_size).double().cuda()
-    #model = JXC1(shape, 12, num_layers=opt.num_layers, kernel_size=opt.kernel_size, opt=opt, window_size=opt.window_size).double().cuda()
-    #model = EquivariantDilatedModel(4)
     # shift up every semitone up to exactly 1 octave
     for i in range(0,13):
         if i>0:
@@ -201,7 +183,6 @@ def shift_and_stack(mel):
         if opt.frames==0:
             if mel_shift.shape[1] > opt.window_size:
                 mel_shift = mel_shift[:, :opt.window_size]
-        print(mel_shift.shape)
         keys_pred_shift, tonic = model.forward(mel_shift.reshape(1, 1, mel_shift.shape[0], mel_shift.shape[1]).double().cuda(), torch.tensor(mel_shift.shape[1]).reshape(1,1).cuda() if opt.frames>0 else None)
         
         if i>0:
@@ -215,7 +196,6 @@ def shift_and_stack(mel):
         if opt.frames==0:
             if mel_shift.shape[1] > opt.window_size:
                 mel_shift = mel_shift[:, :opt.window_size]
-        print(mel_shift.shape)
         keys_pred_shift, tonic = model.forward(mel_shift.reshape(1, 1, mel_shift.shape[0], mel_shift.shape[1]).double().cuda(), torch.tensor(mel_shift.shape[1]).reshape(1,1).cuda() if opt.frames>0 else None)
         
         out = torch.vstack((out,keys_pred_shift))
@@ -282,7 +262,6 @@ def evaluate():
     display_heat_map_adj(results)
     
 def custom_cqt(with_border=True):
-    #mel[100, 20:50] = torch.ones(30)
     shape = opt.octaves*3*12
     mel = torch.zeros([shape,592])
     mel[100:150, 20:50] = torch.ones([50,30])
@@ -290,7 +269,6 @@ def custom_cqt(with_border=True):
         mel[30:40, 400] = torch.ones([10])*10
         mel[10:15, 200] = torch.ones([5])*8
     mel[50,320:350] = torch.ones([30])*20
-    #mel[200:220, 100:110] = torch.ones([20,10])
     
     mel_shift = mel_shifting_up(mel, shift)
     
@@ -298,27 +276,16 @@ def custom_cqt(with_border=True):
 
 # file _path to save:
 name = "Equivariance_Test.pt"
-#does it for 2 octave shifts up
+#does it for 1 octave shift up
 if opt.custom_cqt:
     mel,_ = custom_cqt(opt.cqt_with_border)
 out = shift_and_stack(mel)
 torch.save(out,name)
-if not opt.custom_cqt:
-    print(end_time)
-#sys.exit()
 fig, ax = plt.subplots()
 img = librosa.display.specshow(mel.numpy(),#librosa.amplitude_to_db(mel.numpy(),ref=np.max),
                                x_axis='time',
                          y_axis='cqt_note', sr=rate, ax=ax, hop_length=hop_length, bins_per_octave=12*3)
-fig.colorbar(img, ax=ax, format='%+2.1f dB')#,ticks=[2.0,1.0,0.0])
-#ax.axhline(y=104, color='r', linestyle='-')
+fig.colorbar(img, ax=ax, format='%+2.1f dB')
 ax.set(title='Mel-frequency spectrogram')
 
-#mel, mel_shift = custom_spectrogram()
 plt.savefig('CQT.png')
-sys.exit()
-if mel.shape[1] > opt.window_size:
-    mel = mel[:, :opt.window_size]
-    
-if mel_shift.shape[1] > opt.window_size:
-    mel_shift = mel_shift[:, :opt.window_size]
