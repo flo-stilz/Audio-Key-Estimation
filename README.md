@@ -16,7 +16,7 @@ The project includes:
 
 ## Setup & Datasets
 
-This project makes use of the following datasets:
+This project makes use of the following datasets except FSL10K. The following table only shows the sample amounts used: 
 
 <table>
     <col>
@@ -100,5 +100,6 @@ This project makes use of the following datasets:
 
 </table>
 
-Please create a new conda environment via
+The following Cod is compatible with PyTorch 1.7. Please create a new conda environment via running the following cell after cloning this repository:
+<pre lang="shell">conda create --name <env> --file requirements.txt</pre>
 
