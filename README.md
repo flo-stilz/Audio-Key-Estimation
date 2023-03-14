@@ -30,7 +30,7 @@ This project makes use of the following datasets except FSL10K. The following ta
         <th rowspan=1>Folder Locations</th>
     </tr>
     <tr>
-        <td>[GiantstepsMTG Key](https://www.upf.edu/web/mtg/giantsteps-key)</td>
+        <td>[Giantsteps MTG Key](https://www.upf.edu/web/mtg/giantsteps-key)</td>
         <td>1486</td>
         <td>Yes</td>
         <td>Data/giantsteps-mtg-key-dataset</td>
