@@ -49,73 +49,84 @@ This project makes use of the following datasets except FSL10K. The following ta
         <td>342</td>
         <td>Yes</td>
         <td>Data/Tonality</td>
-        <td>[Data/Tonality](https://zenodo.org/record/4283868#.ZBCggnbMI2w)</td>
+        <td>https://zenodo.org/record/4283868#.ZBCggnbMI2w</td>
     </tr>
     <tr>
-        <td>[Schubert - Winterreise](https://zenodo.org/record/4122060#.ZBCgV3bMI2y)</td>
+        <td>Schubert - Winterreise</td>
         <td>48</td>
         <td>Yes</td>
         <td>Data/Schubert_Winterreise_Dataset_v1-1</td>
+        <td>https://zenodo.org/record/4122060#.ZBCgV3bMI2y</td>
     </tr>
     <tr>
-        <td>[Isophonics - Queen](http://isophonics.net/content/reference-annotations-queen)</td>
+        <td>Isophonics - Queen</td>
         <td>19</td>
         <td>Yes</td>
         <td>Data/Queen_Isophonics</td>
+        <td>http://isophonics.net/content/reference-annotations-queen</td>
     </tr>
     <tr>
-        <td>[Isophonics - Zweieck](http://isophonics.net/content/reference-annotations-zweieck)</td>
+        <td>Isophonics - Zweieck</td>
         <td>18</td>
         <td>Yes</td>
         <td>Data/Zweieck_Isophonics</td>
+        <td>http://isophonics.net/content/reference-annotations-zweieck</td>
     </tr>
     <tr>
-        <td>[Isophonics - The Beatles](http://isophonics.net/content/reference-annotations-beatles)</td>
+        <td>Isophonics - The Beatles</td>
         <td>177</td>
         <td>Yes</td>
         <td>Data/Beatles_Isophonics</td>
+        <td>http://isophonics.net/content/reference-annotations-beatles</td>
     </tr>
     <tr>
-        <td>[Isophonics - King Carole](http://isophonics.net/content/reference-annotations-carole-king)</td>
+        <td>Isophonics - King Carole</td>
         <td>7</td>
         <td>Yes</td>
         <td>Data/King_Carole_Isophonics</td>
+        <td>http://isophonics.net/content/reference-annotations-carole-king</td>
     </tr>
     <tr>
-        <td>[GuitarSet](https://zenodo.org/record/3371780#.ZBCgmHbMI2w)</td>
+        <td>GuitarSet</td>
         <td>360</td>
         <td>No</td>
         <td>Data/GuitarSet</td>
+        <td>https://zenodo.org/record/3371780#.ZBCgmHbMI2w</td>
     </tr>
     <tr>
-        <td>[GTZAN](https://www.kaggle.com/datasets/andradaolteanu/gtzan-dataset-music-genre-classification)</td>
+        <td>GTZAN</td>
         <td>837</td>
         <td>No</td>
         <td>Data/GTZAN</td>
+        <td>https://www.kaggle.com/datasets/andradaolteanu/gtzan-dataset-music-genre-classification</td>
     </tr>
     <tr>
-        <td>[McGill Billboard](https://ddmal.music.mcgill.ca/research/The_McGill_Billboard_Project_(Chord_Analysis_Dataset)/)</td>
+        <td>McGill Billboard</td>
         <td>734</td>
         <td>No</td>
         <td>Data/McGill-Billboard</td>
+        <td>https://ddmal.music.mcgill.ca/research/The_McGill_Billboard_Project_(Chord_Analysis_Dataset)</td>
     </tr>
     <tr>
-        <td>[FSL10K](https://zenodo.org/record/3967852#.ZBCgu3bMI2w)</td>
+        <td>FSL10K</td>
         <td>9486</td>
         <td>No</td>
         <td>Data/FSL10K</td>
+        <td>https://zenodo.org/record/3967852#.ZBCgu3bMI2w</td>
     </tr>
     <tr>
-        <td>[UltimateSongs](https://www.ultimate-guitar.com/)</td>
+        <td>UltimateSongs</td>
         <td>25412</td>
         <td>Yes</td>
         <td>Data/UltimateSongs</td>
+        <td>https://www.ultimate-guitar.com/</td>
     </tr>
     <tr>
-        <td>[KeyFinder](https://www.ibrahimshaath.co.uk/keyfinder/KeyFinderV2Dataset.pdf)</td>
+        <td>KeyFinder</td>
         <td>841</td>
         <td>No</td>
         <td>Data/KeyFinder</td>
+        <td>https://www.ibrahimshaath.co.uk/keyfinder/KeyFinderV2Dataset.pdf</td>
     </tr>
 
 </table>
