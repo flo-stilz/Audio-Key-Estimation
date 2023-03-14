@@ -89,7 +89,7 @@ This project makes use of the following datasets except FSL10K. The following ta
     </tr>
     <tr>
         <td>UltimateSongs</td>
-        <td>?</td>
+        <td>25412</td>
         <td>Yes</td>
     </tr>
     <tr>
@@ -100,6 +100,22 @@ This project makes use of the following datasets except FSL10K. The following ta
 
 </table>
 
-The following Cod is compatible with PyTorch 1.7. Please create a new conda environment via running the following cell after cloning this repository:
+The following Code is compatible with PyTorch 1.8. Please create a new conda environment via running the following cell after cloning this repository:
 <pre lang="shell">conda create --name <env> --file requirements.txt</pre>
+
+Please, also make sure to store the Data in a folder called "Data" in the same main folder than contains this project e.g. main_folder/Audio-Key-Estimation -> main_folder/Data.
+
+## Training & Evaluation
+
+You can train your model via running the following command:
+<pre lang="shell">python train_model.py --gpu <'GPU-NUMBER'></pre>
+
+To evaluate a trained model, look up the lightning_logs version number of the specific model and run the following command:
+<pre lang="shell">python eval.py --gpu <'GPU-NUMBER'> --version <'VERSION-NUMBER'></pre>
+Note: Make sure that any architecture changes that deviate from default in train_model.py are also entered for eval.py.
+
+When testing the architecture for transposition equivariance, just run the following command:
+<pre lang="shell">python equivariance_test.py</pre>
+
+For each of the scripts additional console commands exist which either change input dimensions, architecture designs, learning hyperparameters and so on. You can find the precise descriptions within the respective scripts.
 
