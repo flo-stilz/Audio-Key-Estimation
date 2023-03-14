@@ -150,7 +150,7 @@ To evaluate a trained model, look up the lightning_logs version number of the sp
 Note: Make sure that any architecture changes that deviate from default in train_model.py are also entered for eval.py.
 
 When testing the architecture for transposition equivariance, just run the following command:
-<pre lang="shell">python equivariance_test.py</pre>
+<pre lang="shell">python equivariance_test.py --gpu <'GPU-NUMBER'></pre>
 
 For each of the scripts additional console commands exist which either change input dimensions, architecture designs, learning hyperparameters and so on. You can find the precise descriptions within the respective scripts.
 
