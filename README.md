@@ -28,11 +28,6 @@ This project makes use of the following datasets:
         <th rowspan=2>Genre Annotations</th>
     </tr>
     <tr>
-        <td>GiantstepsMTG Key</td>
-        <td>1486</td>
-        <td>Yes</td>
-    </tr>
-    <tr>
         <td>GiantSteps Key</td>
         <td>604</td>
         <td>Yes</td>
