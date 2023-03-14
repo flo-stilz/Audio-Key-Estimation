@@ -159,5 +159,41 @@ The following figure displays the final model architecture:
 
 
 ## Results
+The final results:
+<table>
+    <col>
+    <col>
+    <col>
+    <tr>
+        <th rowspan=1>Music Genre</th>
+        <th rowspan=1>Classical Music</th>
+        <th rowspan=1>Electronic</th>
+        <th rowspan=1>Rock/Pop</th>
+    </tr>
+    <tr>
+        <td>Dataset</td>
+        <td>Winterreise</td>
+        <td>Giantsteps Key</td>
+        <td>Isophonics</td>
+    </tr>
+    <tr>
+        <td>Mirex</td>
+        <td>86.25%</td>
+        <td>73.15%</td>
+        <td>68.64%</td>
+    </tr>
+    <tr>
+        <td>Key Signature Accuracy</td>
+        <td>83.33%</td>
+        <td>74.67%</td>
+        <td>66.97%</td>
+    </tr>
+    <tr>
+        <td>Tonic Accuracy</td>
+        <td>95.38%</td>
+        <td>74.67%</td>
+        <td>79.64%</td>
+    </tr>
 
+</table>
 
