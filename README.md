@@ -27,6 +27,7 @@ This project makes use of the following datasets:
         <th rowspan=2>Amount of Samples</th>
         <th rowspan=2>Genre Annotations</th>
     </tr>
+    
     <tr>
         <td>GiantstepsMTG Key</td>
         <td>1486</td>
