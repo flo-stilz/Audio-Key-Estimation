@@ -22,80 +22,96 @@ This project makes use of the following datasets except FSL10K. The following ta
     <col>
     <col>
     <col>
+    <col>
     <tr>
         <th rowspan=1>Dataset</th>
         <th rowspan=1>Amount of Samples</th>
         <th rowspan=1>Genre Annotations</th>
+        <th rowspan=1>Folder Locations</th>
     </tr>
     <tr>
         <td>GiantstepsMTG Key</td>
         <td>1486</td>
         <td>Yes</td>
+        <td>Data/giantsteps-mtg-key-dataset</td>
     </tr>
     <tr>
         <td>GiantSteps Key</td>
         <td>604</td>
         <td>Yes</td>
+        <td>Data/giantsteps-key-dataset</td>
     </tr>
     <tr>
         <td>Tonality classicalDB</td>
         <td>342</td>
         <td>Yes</td>
+        <td>Data/Tonality</td>
     </tr>
     <tr>
         <td>Schubert - Winterreise</td>
         <td>48</td>
         <td>Yes</td>
+        <td>Data/Schubert_Winterreise_Dataset_v1-1</td>
     </tr>
     <tr>
         <td>Isophonics - Queen</td>
         <td>19</td>
         <td>Yes</td>
+        <td>Data/Queen_Isophonics</td>
     </tr>
     <tr>
         <td>Isophonics - Zweieck</td>
         <td>18</td>
         <td>Yes</td>
+        <td>Data/Zweieck_Isophonics</td>
     </tr>
     <tr>
         <td>Isophonics - The Beatles</td>
         <td>177</td>
         <td>Yes</td>
+        <td>Data/Beatles_Isophonics</td>
     </tr>
     <tr>
         <td>Isophonics - King Carole</td>
         <td>7</td>
         <td>Yes</td>
+        <td>Data/King_Carole_Isophonics</td>
     </tr>
     <tr>
         <td>GuitarSet</td>
         <td>360</td>
         <td>No</td>
+        <td>Data/GuitarSet</td>
     </tr>
     <tr>
         <td>GTZAN</td>
         <td>837</td>
         <td>No</td>
+        <td>Data/GTZAN</td>
     </tr>
     <tr>
         <td>McGill Billboard</td>
         <td>734</td>
         <td>No</td>
+        <td>Data/McGill-Billboard</td>
     </tr>
     <tr>
         <td>FSL10K</td>
         <td>9486</td>
         <td>No</td>
+        <td>Data/FSL10K</td>
     </tr>
     <tr>
         <td>UltimateSongs</td>
         <td>25412</td>
         <td>Yes</td>
+        <td>Data/UltimateSongs</td>
     </tr>
     <tr>
         <td>KeyFinder</td>
         <td>841</td>
         <td>No</td>
+        <td>Data/KeyFinder</td>
     </tr>
 
 </table>
@@ -104,6 +120,10 @@ The following Code is compatible with PyTorch 1.8. Please create a new conda env
 <pre lang="shell">conda create --name <env> --file requirements.txt</pre>
 
 Please, also make sure to store the Data in a folder called "Data" in the same main folder than contains this project e.g. main_folder/Audio-Key-Estimation -> main_folder/Data.
+
+To download the data use the attached links to the datasets and if no audio files are contained use the youtube_scraper.py:
+<pre lang="shell">python youtube_scraper --source <'song_list.txt'> --destination <'Dataset name'></pre>
+Make sure that 
 
 ## Training & Evaluation
 
@@ -118,4 +138,11 @@ When testing the architecture for transposition equivariance, just run the follo
 <pre lang="shell">python equivariance_test.py</pre>
 
 For each of the scripts additional console commands exist which either change input dimensions, architecture designs, learning hyperparameters and so on. You can find the precise descriptions within the respective scripts.
+
+## Architecture
+The following figure displays the final model architecture:
+
+
+## Results
+
 
