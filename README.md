@@ -45,11 +45,11 @@ This project makes use of the following datasets except FSL10K. The following ta
         <td>https://github.com/GiantSteps/giantsteps-key-dataset</td>
     </tr>
     <tr>
-        <td>Tonality classicalDB(https://zenodo.org/record/4283868#.ZBCggnbMI2w)</td>
+        <td>Tonality classicalDB</td>
         <td>342</td>
         <td>Yes</td>
         <td>Data/Tonality</td>
-        <td>Data/Tonality</td>
+        <td>[Data/Tonality](https://zenodo.org/record/4283868#.ZBCggnbMI2w)</td>
     </tr>
     <tr>
         <td>[Schubert - Winterreise](https://zenodo.org/record/4122060#.ZBCgV3bMI2y)</td>
