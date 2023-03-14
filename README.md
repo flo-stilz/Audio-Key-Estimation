@@ -166,33 +166,51 @@ The final results:
     <col>
     <tr>
         <th rowspan=1>Music Genre</th>
-        <th rowspan=1>Classical Music</th>
-        <th rowspan=1>Electronic</th>
-        <th rowspan=1>Rock/Pop</th>
+        <th rowspan=1>Dataset</th>
+        <th rowspan=1>Mirex</th>
+        <th rowspan=1>Key Signature Accuracy</th>
+        <th rowspan=1>Tonic Accuracy</th>
+        <th rowspan=1>Correct</th>
+        <th rowspan=1>Fifths</th>
+        <th rowspan=1>Parallel</th>
+        <th rowspan=1>Relative</th>
+        <th rowspan=1>Other</th>
     </tr>
     <tr>
-        <td>Dataset</td>
+        <td>Classical Music</td>
         <td>Winterreise</td>
-        <td>Giantsteps Key</td>
-        <td>Isophonics</td>
-    </tr>
-    <tr>
-        <td>Mirex</td>
         <td>86.25%</td>
-        <td>73.15%</td>
-        <td>68.64%</td>
-    </tr>
-    <tr>
-        <td>Key Signature Accuracy</td>
         <td>83.33%</td>
-        <td>74.67%</td>
-        <td>66.97%</td>
+        <td>95.83%</td>
+        <td>79.17%</td>
+        <td>8.33%</td>
+        <td>8.33%</td>
+        <td>4.17%</td>
+        <td>0%</td>
     </tr>
     <tr>
-        <td>Tonic Accuracy</td>
-        <td>95.38%</td>
+        <td>Electronic</td>
+        <td>Giantsteps Key</td>
+        <td>73.15%</td>
         <td>74.67%</td>
+        <td>74.67%</td>
+        <td>66.72%</td>
+        <td>5.30%</td>
+        <td>6.95%%</td>
+        <td>7.95%</td>
+        <td>13.08%</td>
+    </tr>
+    <tr>
+        <td>Rock/Pop</td>
+        <td>Isophonics</td>
+        <td>68.64%</td>
+        <td>66.97%</td>
         <td>79.64%</td>
+        <td>61.54%</td>
+        <td>5.43%</td>
+        <td>15.84%</td>
+        <td>4.07%</td>
+        <td>13.12%</td>
     </tr>
 
 </table>
