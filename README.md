@@ -157,7 +157,7 @@ For each of the scripts additional console commands exist which either change in
 ## Architecture
 The following figure displays the final model architecture:
 <p align="center"><img src="figures/Final_Architecture.drawio.png" width="1000px"/></p>
-<p align="center"><img src="figures/Legend.drawio.png" width="1000px"/></p>
+<p align="center"><img src="figures/Legend.drawio.png" width="200px"/></p>
 
 ## Results
 The final results:
