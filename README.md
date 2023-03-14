@@ -28,23 +28,27 @@ This project makes use of the following datasets except FSL10K. The following ta
         <th rowspan=1>Amount of Samples</th>
         <th rowspan=1>Genre Annotations</th>
         <th rowspan=1>Folder Locations</th>
+        <th rowspan=1>Links</th>
     </tr>
     <tr>
-        <td>[Giantsteps MTG Key](#https://www.upf.edu/web/mtg/giantsteps-key)</td>
+        <td>Giantsteps MTG Key</td>
         <td>1486</td>
         <td>Yes</td>
         <td>Data/giantsteps-mtg-key-dataset</td>
+        <td>https://www.upf.edu/web/mtg/giantsteps-key</td>
     </tr>
     <tr>
-        <td>[GiantSteps Key](https://github.com/GiantSteps/giantsteps-key-dataset)</td>
+        <td>GiantSteps Key</td>
         <td>604</td>
         <td>Yes</td>
         <td>Data/giantsteps-key-dataset</td>
+        <td>https://github.com/GiantSteps/giantsteps-key-dataset</td>
     </tr>
     <tr>
-        <td>[Tonality classicalDB](https://zenodo.org/record/4283868#.ZBCggnbMI2w)</td>
+        <td>Tonality classicalDB(https://zenodo.org/record/4283868#.ZBCggnbMI2w)</td>
         <td>342</td>
         <td>Yes</td>
+        <td>Data/Tonality</td>
         <td>Data/Tonality</td>
     </tr>
     <tr>
