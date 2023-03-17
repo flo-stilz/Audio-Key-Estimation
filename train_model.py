@@ -53,12 +53,12 @@ def train(opt):
             debug_d)
     else:
         train_data.import_data(
-            #giantsteps_mtg_key,
+            giantsteps_mtg_key,
             gtzan,
-            #key_finder,
+            key_finder,
             tonality,
             guitar_set,
-            #ultimate_songs,
+            ultimate_songs,
         )
     
         val_data.import_data(
