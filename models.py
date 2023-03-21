@@ -763,23 +763,38 @@ class PitchClassNet(pl.LightningModule):
 
             for j in range(tonic.shape[0]):
                 if j==0:
-                    tonic_out = torch.mean(tonic[j,:,:,:actual_seq_length[j]],axis=-1)
-                    key_out = torch.mean(key[j,:,:,:actual_seq_length[j]],axis=-1)
+                    if self.opt.max_pool:
+                        tonic_out = torch.max(tonic[j,:,:,:actual_seq_length[j]],axis=-1).values
+                        key_out = torch.max(key[j,:,:,:actual_seq_length[j]],axis=-1).values
+                    else:
+                        tonic_out = torch.mean(tonic[j,:,:,:actual_seq_length[j]],axis=-1)
+                        key_out = torch.mean(key[j,:,:,:actual_seq_length[j]],axis=-1)
                     tonic_out = tonic_out.reshape(1, tonic_out.shape[0],tonic_out.shape[1])
                     key_out = key_out.reshape(1, key_out.shape[0],key_out.shape[1])
                     if self.opt.genre:
-                     genre_out = torch.mean(genre[j,:,:,:actual_seq_length[j]],axis=-1)
-                     genre_out = genre_out.reshape(1, genre_out.shape[0],genre_out.shape[1])
+                        if self.opt.max_pool:
+                            genre_out = torch.max(genre[j,:,:,:actual_seq_length[j]],axis=-1).values
+                        else:
+                            genre_out = torch.mean(genre[j,:,:,:actual_seq_length[j]],axis=-1)
+                        
+                        genre_out = genre_out.reshape(1, genre_out.shape[0],genre_out.shape[1])
                 else:
                     tonic_out = torch.cat((tonic_out, torch.mean(tonic[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, tonic_out.shape[1],tonic_out.shape[2])))
                     key_out = torch.cat((key_out, torch.mean(key[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, key_out.shape[1],key_out.shape[2])))
                     if self.opt.genre:
                         genre_out = torch.cat((genre_out, torch.mean(genre[j,:,:,:actual_seq_length[j]],axis=-1).reshape(1, genre_out.shape[1],genre_out.shape[2])))
         elif (not self.opt.local):
-            tonic_out = torch.mean(tonic, axis=-1)
-            key_out = torch.mean(key, axis=-1)
+            if self.opt.max_pool:
+                tonic_out = torch.max(tonic, axis=-1).values
+                key_out = torch.max(key, axis=-1).values
+            else:   
+                tonic_out = torch.mean(tonic, axis=-1)
+                key_out = torch.mean(key, axis=-1)
             if self.opt.genre:
-                genre_out = torch.mean(genre, axis=-1)
+                if self.opt.max_pool:
+                    genre_out = torch.max(genre, axis=-1).values
+                else:
+                    genre_out = torch.mean(genre, axis=-1)
 
         if not self.opt.local:
             tonic_out = nn.Flatten()(tonic_out)

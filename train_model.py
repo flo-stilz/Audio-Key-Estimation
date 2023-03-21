@@ -85,6 +85,11 @@ def train(opt):
     # Initialize model
     os.environ["CUDA_VISIBLE_DEVICES"]=str(opt.gpu)
     
+    if opt.debug:
+        # when debug reduce bs and gradient accumulation
+        opt.batch_size = 2
+        opt.acc_grad = 1
+    
     if not opt.only_semitones:
         shape = opt.octaves*36
     elif opt.only_semitones:
@@ -118,7 +123,8 @@ def train(opt):
     final_model_path = trainer.checkpoint_callback.best_model_path # load best model checkpoint
     result = trainer.validate(ckpt_path=final_model_path, dataloaders=val)
     
-
+    results = []
+    hp_results = {}
     hp_results['val_acc'] = result[0]['val_accuracy']
     hp_results['val_acc_tonic'] = result[0]['val_accuracy_tonic']
     if opt.genre:
@@ -227,6 +233,8 @@ def init_parser():
                         help='Use Memory-efficient variant for upsampling pitc class wise features to pitch wise features')
     parser.add_argument('--no_ckpt', action="store_true",
                         help='Do not save best model!')
+    parser.add_argument('--max_pool', action="store_true",
+                        help='Perform Global MaxPooling')
     
     opt = parser.parse_args()
     

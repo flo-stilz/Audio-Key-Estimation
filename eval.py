@@ -214,6 +214,8 @@ def init_parser():
                         help='Trained model version number which shall be evaluated')
     parser.add_argument('--no_ckpt', action="store_false",
                         help='Do not save best model! Default deactivated')
+    parser.add_argument('--max_pool', action="store_true",
+                        help='Perform Global MaxPooling')
     
     opt = parser.parse_args()
     

@@ -87,6 +87,8 @@ def init_parser():
                         help='Use Memory-efficient variant for upsampling pitc class wise features to pitch wise features')
     parser.add_argument('--no_ckpt', action="store_false",
                         help='Do save best model!')
+    parser.add_argument('--max_pool', action="store_true",
+                        help='Perform Global MaxPooling')
     opt = parser.parse_args()
     
     return opt
