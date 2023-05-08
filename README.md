@@ -12,7 +12,7 @@ The project includes:
 - Different PitchClassNet architectures
 - training script
 - fast model evaluation script
-- Equivariance testing script to prove transcription equivariance by design
+- Equivariance testing script to prove tranposition equivariance by design
 
 ## Setup & Datasets
 
