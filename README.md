@@ -1,4 +1,4 @@
-# Audio-Key-Estimation
+# Transposition Equivariant Music Key Signature Estimation 
 
 ## Introduction
 
